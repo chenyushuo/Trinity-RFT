@@ -119,3 +119,9 @@ class OpType(Enum):
     SUB = "sub"
     MUL = "mul"
     DIV = "div"
+
+
+class SyncStyle(CaseInsensitiveEnum):
+    FIXED = "fixed"
+    DYNAMIC_BY_TRAINER = "dynamic_by_trainer"
+    DYNAMIC_BY_EXPLORER = "dynamic_by_explorer"

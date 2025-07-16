@@ -11,7 +11,8 @@ from abc import ABC, abstractmethod
 import ray
 
 from trinity.common.config import Config
-from trinity.common.constants import RunningStatus, SyncMethod
+from trinity.common.constants import SyncMethod
+from trinity.common.synchronizer import Synchronizer
 from trinity.utils.log import get_logger
 
 
@@ -22,7 +23,7 @@ class Trainer:
         self.config = config
         self.logger = get_logger(__name__)
         self.engine = get_trainer_wrapper(config)
-        self.explorer_ref = None
+        self.synchronizer = Synchronizer.get_actor(config)
 
     def prepare(self) -> None:
         """Prepare the trainer."""
@@ -53,7 +54,7 @@ class Trainer:
 
     def need_sync(self) -> bool:
         """Whether to sync the model weight."""
-        return self.engine.train_step_num % self.config.synchronizer.sync_interval == 0
+        return ray.get(self.synchronizer.need_sync.remote(self.engine.train_step_num, "trainer"))
 
     def sync_weight(self) -> None:
         """Sync the model weight."""
@@ -61,13 +62,13 @@ class Trainer:
             self.logger.info(
                 f"Trainer synchronizing weights at step {self.engine.train_step_num} starting.."
             )
-            if self.explorer_ref is None:
-                self.explorer_ref = ray.get_actor(self.config.explorer.name)
-            explorer_status = ray.get(self.explorer_ref.running_status.remote())
-            if explorer_status == RunningStatus.STOPPED:
-                self.logger.warning("Explorer has already stopped. Skipping sync weight.")
+            status = ray.get(
+                self.synchronizer.ready_to_sync.remote(self.engine.train_step_num, "trainer")
+            )
+            if not status:
+                self.logger.warning("Explorer is not ready to sync weight. Skipping sync weight.")
+                # TODO: shutdown trainer
                 return
-            ray.get(self.explorer_ref.ready_to_sync.remote())
             self.engine.sync_weight()
             self.logger.info(
                 f"Trainer synchronizing weights at step {self.engine.train_step_num} end."
