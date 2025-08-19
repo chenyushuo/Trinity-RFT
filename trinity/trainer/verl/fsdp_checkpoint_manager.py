@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 import warnings
 from dataclasses import asdict
 from typing import Optional, Union
@@ -30,6 +31,27 @@ from verl.utils.logger import log_with_rank
 
 from trinity.common.constants import SyncMethod
 from trinity.manager.synchronizer import Synchronizer
+
+MAX_SPEED = 1024 * 1024 * 300
+
+
+class BandwidthLimiter:
+    def __init__(self, file, max_bytes_per_sec):
+        self.file = file
+        self.max_bytes_per_sec = max_bytes_per_sec
+        self.bytes_written = 0
+        self.start_time = time.time()
+
+    def write(self, data):
+        self.bytes_written += len(data)
+        expected_time = self.bytes_written / self.max_bytes_per_sec
+        elapsed_time = time.time() - self.start_time
+        if elapsed_time < expected_time:
+            time.sleep(expected_time - elapsed_time)
+        return self.file.write(data)
+
+    def flush(self):
+        return self.file.flush()
 
 
 class FSDPCheckpointManager(OldFSDPCheckpointManager):
@@ -122,6 +144,7 @@ class FSDPCheckpointManager(OldFSDPCheckpointManager):
             max_ckpt_to_keep (int, optional): Maximum number of checkpoints to keep locally.
             model_state_dict_only (bool): Whether to only save the model state dict (no optimizer, etc.).
         """
+        max_speed = MAX_SPEED / self.world_size
         if global_step == 0 and model_state_dict_only:
             self._upload_state_dict(None, global_step)
             return
@@ -185,7 +208,9 @@ class FSDPCheckpointManager(OldFSDPCheckpointManager):
                             self._model_state_dict_thread.join()
 
                         def _save_model_state_dict():
-                            torch.save(model_state_dict, model_path)
+                            with open(model_path, "wb") as f:
+                                limited_file = BandwidthLimiter(f, max_speed)
+                                torch.save(model_state_dict, limited_file)
                             log_with_rank(
                                 f"Saved model to {os.path.abspath(model_path)}",
                                 rank=self.rank,
@@ -204,7 +229,9 @@ class FSDPCheckpointManager(OldFSDPCheckpointManager):
                         self._optimizer_state_dict_thread.join()
 
                     def _save_optimizer_state_dict():
-                        torch.save(optimizer_state_dict, optim_path)
+                        with open(optim_path, "wb") as f:
+                            limited_file = BandwidthLimiter(f, max_speed)
+                            torch.save(optimizer_state_dict, limited_file)
                         log_with_rank(
                             f"Saved optim to {os.path.abspath(optim_path)}",
                             rank=self.rank,

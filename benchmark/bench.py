@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import subprocess
 import time
@@ -61,14 +62,13 @@ def set_engine_num(config, args):
 
 
 def prepare_configs(args, rank, current_time):
-    base_path = os.path.dirname(os.path.abspath(__file__))
-
     current_time_str = time.strftime("%Y%m%d-%H%M%S", time.localtime(current_time))
-    run_path = os.path.join(base_path, "runs", current_time_str)
+    run_path = os.path.join(args.output_root_dir, "runs", current_time_str)
     config_path = os.path.join(run_path, "config.yaml")
     if rank == 0:
         os.makedirs(run_path)
 
+        base_path = os.path.dirname(os.path.abspath(__file__))
         with open(os.path.join(base_path, "config", f"{args.dataset}-template.yaml")) as f:
             config = yaml.safe_load(f)
 
@@ -103,6 +103,12 @@ def prepare_configs(args, rank, current_time):
             ] = args.lr
         if args.sync_interval:
             config["synchronizer"]["sync_interval"] = args.sync_interval
+        if args.add_strategy_json:
+            add_strategy_dict = json.loads(args.add_strategy_json)
+            assert len(add_strategy_dict) == 1
+            add_strategy = list(add_strategy_dict.keys())[0]
+            config["algorithm"]["add_strategy"] = add_strategy
+            config["algorithm"]["add_strategy_args"] = add_strategy_dict[add_strategy]
 
         with open(config_path, "w") as f:
             yaml.dump(config, f, allow_unicode=True, sort_keys=False)
@@ -151,6 +157,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset", type=str, choices=["gsm8k", "countdown", "openr1"])
     parser.add_argument(
+        "--output_root_dir",
+        type=str,
+        default=os.path.dirname(os.path.abspath(__file__)),
+        help="The output root dir, default is the directory where this file is located.",
+    )
+    parser.add_argument(
         "--dlc", action="store_true", help="Specify when running in Aliyun PAI DLC."
     )
     parser.add_argument("--node_num", type=int, default=1, help="Specify the number of nodes.")
@@ -192,6 +204,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--sync_interval", type=int, default=None, help="Specify the sync interval."
+    )
+    parser.add_argument(
+        "--add_strategy_json",
+        type=str,
+        default=None,
+        help="Specify the add strategy with json format.",
     )
     args = parser.parse_args()
     main(args)

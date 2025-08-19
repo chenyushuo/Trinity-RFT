@@ -16,6 +16,14 @@ try:
     import mlflow
 except ImportError:
     mlflow = None
+
+try:
+    import ml_tracker
+except ImportError:
+    ml_tracker = None
+
+import yaml
+from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 
 from trinity.common.config import Config
@@ -218,3 +226,26 @@ class MlflowMonitor(Monitor):
             "username": None,
             "password": None,
         }
+
+
+@MONITOR.register_module("ml_tracker")
+class MLTrackerMonitor(Monitor):
+    def __init__(self, project, group: str, name, role, config: Config = None):
+        self.logger = ml_tracker.init(
+            name=f"{name}_{role}",
+            tags=[role],
+            config=yaml.safe_load(OmegaConf.to_yaml(config)),
+            save_code=False,
+        )
+        self.console_logger = get_logger(__name__)
+
+    def log_table(self, table_name: str, experiences_table: pd.DataFrame, step: int):
+        pass
+
+    def log(self, data: dict, step: int, commit: bool = False) -> None:
+        """Log metrics."""
+        self.logger.log(data, step=step, commit=commit)
+        self.console_logger.info(f"Step {step}: {data}")
+
+    def close(self) -> None:
+        self.logger.finish()

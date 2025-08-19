@@ -1,0 +1,178 @@
+mode: both
+project: Trinity-RFT
+group: openr1-bench
+name: openr1-qwen2.5-7B
+checkpoint_root_dir: placeholder
+model:
+  model_path: Qwen/Qwen2.5-7B-Instruct
+algorithm:
+  algorithm_type: grpo
+  repeat_times: 32
+  kl_loss_fn: k2
+  kl_loss_fn_args:
+    kl_coef: 0.0
+cluster:
+  node_num: 1
+  gpu_per_node: 8
+buffer:
+  total_epochs: 1
+  batch_size: 60
+  max_retry_times: 3
+  max_retry_interval: 1
+  explorer_input:
+    default_workflow_type: 'math_boxed_workflow'
+    default_reward_fn_type: 'math_boxed_reward'
+    taskset:
+      name: math
+      storage_type: file
+      path: /mnt/data/yuchang/datasets/luffy/train/
+      format:
+        prompt_key: 'question'
+        response_key: 'ground_truth'
+        system_prompt: "Your task is to follow a systematic, thorough reasoning process before providing\
+          \ the final solution. This involves analyzing, summarizing, exploring, reassessing,\
+          \ and refining your thought process through multiple iterations. Structure your\
+          \ response into two sections: Thought and Solution. In the Thought section, present\
+          \ your reasoning using the format: \"<think>\n {thoughts} </think>\n\". Each thought\
+          \ should include detailed analysis, brainstorming, verification, and refinement\
+          \ of ideas. After \"</think>\n,\" in the Solution section, provide the final, logical,\
+          \ and accurate answer, clearly derived from the exploration in the Thought section.\
+          \ If applicable, include the answer in \\boxed{} for closed-form results like multiple\
+          \ choices or mathematical solutions."
+      rollout_args:
+        temperature: 1.0
+        logprobs: 0
+    eval_tasksets: []
+    # - name: AIME2024
+    #   storage_type: file
+    #   path: /mnt/data/yuchang/datasets/luffy/AIME2024/
+    #   split: 'test'
+    #   format:
+    #     prompt_key: 'question'
+    #     response_key: 'answer'
+    #   rollout_args:
+    #     n: 32 # 8
+    #     temperature: 0.6
+    # - name: AIME2025
+    #   storage_type: file
+    #   path: /mnt/data/yuchang/datasets/luffy/AIME2025/
+    #   split: 'test'
+    #   format:
+    #     prompt_key: 'problem'
+    #     response_key: 'answer'
+    #   rollout_args:
+    #     n: 32 # 8
+    #     temperature: 0.6
+    # - name: AMC23
+    #   storage_type: file
+    #   path: /mnt/data/yuchang/datasets/luffy/AMC23/
+    #   split: 'test'
+    #   format:
+    #     prompt_key: 'question'
+    #     response_key: 'answer'
+    #   rollout_args:
+    #     n: 32 # 8
+    #     temperature: 0.6
+    # - name: MATH500
+    #   storage_type: file
+    #   path: /mnt/data/yuchang/datasets/luffy/MATH500/
+    #   split: 'test'
+    #   format:
+    #     prompt_key: 'problem'
+    #     response_key: 'answer'
+    #   rollout_args:
+    #     n: 4 # 1
+    #     temperature: 0.6
+    # - name: Minerva
+    #   storage_type: file
+    #   path: /mnt/data/yuchang/datasets/luffy/Minerva/
+    #   split: 'test'
+    #   format:
+    #     prompt_key: 'question'
+    #     response_key: 'answer'
+    #   rollout_args:
+    #     n: 4 # 1
+    #     temperature: 0.6
+  trainer_input:
+    experience_buffer:
+      name: math_buffer
+      storage_type: queue
+      path: ''
+      use_priority_queue: true
+      replay_buffer_kwargs:
+        priority_fn: linear_decay
+        decay: 0.1
+explorer:
+  eval_interval: 10
+  # runner_num: 60
+  runner_per_model: 8
+  rollout_model:
+    engine_type: vllm_async
+    engine_num: 3
+    tensor_parallel_size: 1
+    enable_prefix_caching: true # false
+    enforce_eager: false
+    dtype: bfloat16
+    max_prompt_tokens: 1024
+    max_response_tokens: 8192
+    seed: 42
+synchronizer:
+  sync_style: fixed
+  sync_method: 'nccl'
+  sync_interval: 10
+  sync_timeout: 1200
+trainer:
+  trainer_type: 'verl'
+  save_interval: 50
+  trainer_config:
+    actor_rollout_ref:
+      hybrid_engine: True
+      model:
+        external_lib: null
+        override_config: { }
+        enable_gradient_checkpointing: True
+        use_remove_padding: True  # False
+      actor:
+        strategy: fsdp  # This is for backward-compatibility
+        use_dynamic_bsz: True # False
+        ppo_max_token_len_per_gpu: 22000
+        grad_clip: 1.0
+        ppo_epochs: 1
+        shuffle: False
+        ulysses_sequence_parallel_size: 1 # sp size
+        checkpoint:
+          load_contents: ['model', 'optimizer', 'extra']
+          save_contents: ['model', 'optimizer', 'extra']
+        optim:
+          lr: 1e-6
+          lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
+          # min_lr_ratio: null   # only useful for warmup with cosine
+          warmup_style: constant  # select from constant/cosine
+          total_training_steps: -1  # must be override by program
+        fsdp_config:
+          wrap_policy:
+            # transformer_layer_cls_to_wrap: None
+            min_num_params: 0
+          param_offload: False
+          optimizer_offload: False
+          fsdp_size: -1
+      ref:
+        fsdp_config:
+          param_offload: False
+          wrap_policy:
+            # transformer_layer_cls_to_wrap: None
+            min_num_params: 0
+        log_prob_use_dynamic_bsz: True # ${actor_rollout_ref.actor.use_dynamic_bsz}
+        log_prob_max_token_len_per_gpu: 81920
+        ulysses_sequence_parallel_size: ${trainer.trainer_config.actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
+    trainer:
+      balance_batch: True
+      # auto: find the last ckpt to resume. If can't find, start from scratch
+      resume_mode: auto # or auto or resume_path if
+      default_hdfs_dir: null
+      remove_previous_ckpt_in_save: False
+      del_local_ckpt_after_load: False
+      val_before_train: False
+
+monitor:
+  monitor_type: wandb

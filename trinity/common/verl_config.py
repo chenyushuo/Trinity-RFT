@@ -315,6 +315,7 @@ class veRLConfig:
             self.trainer.resume_mode = "auto"
 
         self.buffer = config.buffer
+        self.data.train_batch_size = config.buffer.train_batch_size
 
         self.synchronizer = config.synchronizer
         self.actor_rollout_ref.synchronizer = config.synchronizer
