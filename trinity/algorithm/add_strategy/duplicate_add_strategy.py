@@ -196,7 +196,7 @@ class RemoveZeroAdvantageAddStrategy(AddStrategy):
         for key, value in rewards_mean_counts.items():
             normalized_value = value / cnt_tot
             if key == 0 or key == 1:
-                metrics[f"filtered_group_advantages/rewards_mean_range/{key}"] += normalized_value
+                metrics[f"filtered_group_advantages/rewards_mean_range/{int(key)}"] += normalized_value
             else:
                 # 找到所属区间 (0 < key < 1)
                 for threshold, label in range_bins[1:-1]:  # 排除第一个 0 和最后一个 1
