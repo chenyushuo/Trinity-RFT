@@ -180,6 +180,7 @@ def launch_run_py(
                 "DASHSCOPE_API_KEY": dashscope_api_key,
             },
             timeout=3600,
+            request_timeout=3600,
         )
         logger.info("result.stdout: %s", result.stdout.strip())
         logger.info("result.stderr: %s", result.stderr.strip())

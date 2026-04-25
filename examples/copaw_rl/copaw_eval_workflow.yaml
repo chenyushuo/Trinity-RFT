@@ -1,4 +1,4 @@
-mode: both
+mode: bench
 project: "CoPaw-Pro-RL"
 group: ${oc.env:EXP_DATE}-${oc.env:EXP_SOURCE}
 name: ${oc.env:EXP_NAME}
@@ -55,7 +55,27 @@ buffer:
           bucket_name: ${oc.env:OSS_BUCKET_NAME,"copaw-dataset"}
           prefix: ${oc.env:OSS_PREFIX,"data/0318_train_tasks_compressed/"}
       default_workflow_type: copaw_workflow  # examples.copaw_rl.workflows.CoPawWorkflow
-    eval_tasksets: []
+    eval_tasksets:
+    - name: taskset
+      storage_type: file
+      path: ${oc.env:TRINITY_TASKSET_PATH,examples/copaw_rl/data}
+      split: test
+      repeat_times: 8
+      data_selector:
+        selector_type: shuffle
+      workflow_args:
+        token: ${oc.env:E2B_API_KEY}
+        template: ${oc.env:E2B_TEMPLATE}
+        domain: ${oc.env:E2B_DOMAIN,"sandbox01.vpc.cn-hongkong.pai-eas.aliyuncs.com"}
+        dashscope_api_key: ${oc.env:DASHSCOPE_API_KEY}
+        oss:
+          access_key_id: ${oc.env:OSS_ACCESS_KEY_ID}
+          access_key_secret: ${oc.env:OSS_ACCESS_KEY_SECRET}
+          region: ${oc.env:OSS_REGION,cn-beijing}
+          endpoint: ${oc.env:OSS_ENDPOINT,"oss-cn-beijing-internal.aliyuncs.com"}
+          bucket_name: ${oc.env:OSS_BUCKET_NAME,"copaw-dataset"}
+          prefix: ${oc.env:OSS_PREFIX,"data/0318_train_tasks_compressed/"}
+      default_workflow_type: copaw_workflow  # copaw_eval_workflow
   trainer_input:
     experience_buffer:
       name: experience_buffer

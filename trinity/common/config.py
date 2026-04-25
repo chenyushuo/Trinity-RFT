@@ -801,6 +801,8 @@ class SynchronizerConfig:
     sync_style: SyncStyle = SyncStyle.FIXED
     # sync weights every `sync_interval` steps
     sync_interval: int = 1
+    explorer_sync_interval: Optional[int] = None  # if not set, use `sync_interval`
+    trainer_sync_interval: Optional[int] = None  # if not set, use `sync_interval`
     # allow explorer to run `sync_offset` steps before sync
     sync_offset: int = 0
     # waiting for `sync_timeout` seconds before timeout in `nccl` method

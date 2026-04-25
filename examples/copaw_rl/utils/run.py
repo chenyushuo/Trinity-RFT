@@ -267,6 +267,7 @@ def _build_agent_content(
 
     return content_blocks or None
 
+
 def _extract_input_answer(task_config: dict) -> str:
     """从 task_config 中提取 input_answer。"""
     evaluation = task_config.get("evaluation") or {}
@@ -276,7 +277,7 @@ def _extract_input_answer(task_config: dict) -> str:
 
     if isinstance(raw_answer, dict):
         answer_obj = raw_answer
-        answer_text = json.dumps(answer_obj, ensure_ascii=False) # TODO
+        answer_text = json.dumps(answer_obj, ensure_ascii=False)  # TODO
     elif isinstance(raw_answer, str):
         s = raw_answer.strip()
         if s:
@@ -287,8 +288,9 @@ def _extract_input_answer(task_config: dict) -> str:
                 else:
                     answer_text = s  # JSON 但不是 dict（如数组/数字），按普通文本处理
             except json.JSONDecodeError:
-                answer_text = s      # 普通字符串
+                answer_text = s  # 普通字符串
     return answer_text
+
 
 def _extract_text_from_content(content_blocks: list[dict]) -> str:
     """从 content blocks 中提取纯文本部分，用于日志和 summary。"""
@@ -968,10 +970,14 @@ def main():  # noqa: C901
         # Step 2: 将 environment/ 文件部署到 $HOME
         log.info("部署 environment/ 到 $HOME ...")
         deploy_environment(_SCRIPT_DIR)
+        task_config = _load_task_yaml(_SCRIPT_DIR)
 
         # Step 2.5: 如果存在 setup.sh，在调用 Agent 之前执行
-        setup_script = os.path.join(_SCRIPT_DIR, "setup.sh")
-        if os.path.isfile(setup_script):
+        for setup_script in task_config.get("setup", []):
+            setup_script = os.path.join(_SCRIPT_DIR, setup_script)
+            if not os.path.isfile(setup_script):
+                log.warning("setup.sh 不存在: %s", setup_script)
+                continue
             log.info("发现 setup.sh，执行前置设置: %s", setup_script)
             os.chmod(setup_script, 0o755)
             setup_result = subprocess.run(
@@ -994,7 +1000,6 @@ def main():  # noqa: C901
         workspace_baseline = _snapshot_workspace() if args.evaluation else None
 
         # Step 3: 构建 agent 输入（优先 task.yaml 多模态，兼容 instruction.md）
-        task_config = _load_task_yaml(_SCRIPT_DIR)
         content_blocks = (
             _build_agent_content(task_config, task_dir=_SCRIPT_DIR) if task_config else None
         )
@@ -1056,7 +1061,9 @@ def main():  # noqa: C901
         trajectories = extract_trajectories(session_data)
 
         if not args.evaluation:
-            export_training_data(args.task_id, trajectories, session_data=session_data, input_answer=input_answer)
+            export_training_data(
+                args.task_id, trajectories, session_data=session_data, input_answer=input_answer
+            )
             return
 
         structured_trajectory = parse_structured_trajectory(session_data)
