@@ -2,13 +2,12 @@ import argparse
 import hashlib
 import json
 import os
-import pickle
 import time
+import zipfile
 from pathlib import Path
 from typing import Tuple
 
 import httpx
-import numpy as np
 from e2b import CommandExitException, NotFoundException, Sandbox
 
 
@@ -103,18 +102,29 @@ def create_sandbox(token, domain, template, logger) -> Sandbox:
 
 
 def update_sandbox_files(sandbox: Sandbox, template, logger):
+    """递归同步 utils/ 下所有 .py 文件到 /root/，保留目录结构。
+
+    - 顶层模块（如 bench_client.py）→ /root/bench_client.py
+    - 包目录（如 copaw_eval/__init__.py）→ /root/copaw_eval/__init__.py
+    - md5_maps.json 中的 key 用 POSIX 相对路径（如 "copaw_eval/__init__.py"）。
+    - 跳过 __pycache__ 等运行时产物。
+    """
     utils_dir = Path(__file__).parent.parent / "utils"
     with utils_dir.joinpath("md5_maps.json").open("r") as f:
         md5_maps = json.load(f)
 
     md5_map = md5_maps.get(template, {})
-    for py_file in utils_dir.glob("*.py"):
+    for py_file in utils_dir.rglob("*.py"):
+        rel_parts = py_file.relative_to(utils_dir).parts
+        if any(p.startswith((".", "__pycache__")) for p in rel_parts):
+            continue
+        rel_path = py_file.relative_to(utils_dir).as_posix()
         with open(py_file, "rb") as f:
             file_md5 = hashlib.file_digest(f, "md5").hexdigest()
-        if md5_map.get(py_file.name, "") != file_md5:
+        if md5_map.get(rel_path, "") != file_md5:
             logger.info(f"Updating sandbox [{sandbox.sandbox_id}] with [{py_file}]...")
             with open(py_file, "r") as f:
-                sandbox.files.write(f"/root/{py_file.name}", f)
+                sandbox.files.write(f"/root/{rel_path}", f)
 
 
 def get_or_create_sandbox(sandbox_id, token, domain, template, logger) -> Tuple[Sandbox, bool]:
@@ -183,8 +193,8 @@ def launch_run_py(
                 "OSS_BUCKET_NAME": oss_config["bucket_name"],
                 "DASHSCOPE_API_KEY": dashscope_api_key,
             },
-            timeout=3600,
-            request_timeout=3600,
+            timeout=1200,  # 30 min; was 3600
+            request_timeout=1800,
             on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
             on_stderr=lambda data: logger.info(f"[stderr]: {data.rstrip()}"),
         )
@@ -212,6 +222,25 @@ def run_workflow(
     content = sandbox.files.read("/root/dataset.pkl", format="bytes")
     dataset = pickle.loads(content)
     return dataset
+
+
+def _save_and_extract_zip(sandbox: Sandbox, remote_path: str, task_dir: str, logger):
+    """Download a zip from the sandbox, extract it, and delete the zip."""
+    filename = os.path.basename(remote_path)
+    zip_path = os.path.join(task_dir, filename)
+    try:
+        data = sandbox.files.read(remote_path, format="bytes")
+        with open(zip_path, "wb") as f:
+            f.write(data)
+        extract_dir = os.path.join(task_dir, filename.replace(".zip", ""))
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_dir)
+        os.remove(zip_path)
+        logger.info("Extracted %s -> %s", filename, extract_dir)
+    except NotFoundException as e:
+        logger.warning(f"{Colors.WARNING}{filename} not found: {e}{Colors.ENDC}")
+    except zipfile.BadZipFile as e:
+        logger.warning(f"{Colors.WARNING}{filename} is not a valid zip: {e}{Colors.ENDC}")
 
 
 def run_eval_workflow(
@@ -247,23 +276,9 @@ def run_eval_workflow(
     session = sandbox.files.read("/root/session.json")
     with open(os.path.join(task_dir, "session.json"), "w") as f:
         f.write(session)
-    # session_data = json.loads(session)
 
-    try:
-        screenshots = sandbox.files.read("/root/screenshots.zip", format="bytes")
-        with open(os.path.join(task_dir, "screenshots.zip"), "wb") as f:
-            f.write(screenshots)
-    except NotFoundException as e:
-        logger.warning(f"{Colors.WARNING}screenshots.zip not found: {e}{Colors.ENDC}")
-        screenshots = None
-
-    try:
-        workspace_files = sandbox.files.read("/root/workspace_files.zip", format="bytes")
-        with open(os.path.join(task_dir, "workspace_files.zip"), "wb") as f:
-            f.write(workspace_files)
-    except NotFoundException as e:
-        logger.warning(f"{Colors.WARNING}workspace_files.zip not found: {e}{Colors.ENDC}")
-        workspace_files = None
+    _save_and_extract_zip(sandbox, "/root/screenshots.zip", task_dir, logger)
+    _save_and_extract_zip(sandbox, "/root/workspace_files.zip", task_dir, logger)
 
     score = summary_data.get("summary", {}).get("avg_score", -1) if summary_data else -1
     status = "PASS" if score == 100 else "FAIL" if score >= 0 else "ERROR"
@@ -274,7 +289,6 @@ def run_eval_workflow(
         task_steps = [t.get("steps", -1) for t in summary_data["tasks"] if t.get("steps", -1) >= 0]
         if task_steps:
             steps = sum(task_steps)
-        # 时延：优先用 worker 内记录的 duration_seconds，否则用本地 latency_seconds
         durs = [
             t.get("duration_seconds")
             for t in summary_data["tasks"]
@@ -284,7 +298,6 @@ def run_eval_workflow(
             duration_seconds = sum(durs)
         else:
             duration_seconds = latency_seconds
-        # 产生 token 计费长度：trajectory 各步 thought 长度 + 最终回复长度
         total_chars = 0
         for t in summary_data["tasks"]:
             for step in t.get("trajectory") or []:
@@ -324,6 +337,88 @@ def run_teacher_workflow(
     trajectory_file = sandbox.files.read("/root/tests/traj.json")
     trajectory = json.loads(trajectory_file)
     return trajectory_file, trajectory, run_outputs
+
+
+def run_teacher_eval_workflow(
+    sandbox: Sandbox,
+    task_id: str,
+    oss_config: dict,
+    dashscope_api_key: str,
+    model_id: str,
+    model_label: str,
+    checkpoint_job_dir: str,
+    logger,
+):
+    """Teacher model evaluation: uses DashScope built-in provider instead of
+    --provider-base-url, and collects the same summary/session/screenshots
+    artifacts as run_eval_workflow."""
+    cmd = (
+        f"python run.py --task-id {task_id} --oss-prefix {oss_config['prefix']} "
+        f"--provider-name dashscope --provider-model-id {model_id} "
+        f"--provider-api-key {dashscope_api_key} --evaluation"
+    )
+    latency_seconds, _ = launch_run_py(sandbox, cmd, oss_config, dashscope_api_key, logger)
+
+    if model_label:
+        task_dir = os.path.join(checkpoint_job_dir, model_label, task_id)
+    else:
+        task_dir = os.path.join(checkpoint_job_dir, task_id)
+    os.makedirs(task_dir, exist_ok=True)
+    logger.info("Saving summary to %s", task_dir)
+
+    summary = sandbox.files.read("/root/summary.json")
+    with open(os.path.join(task_dir, "summary.json"), "w") as f:
+        f.write(summary)
+    summary_data = json.loads(summary)
+    logger.info("summary.json content: %s", summary_data)
+
+    session = sandbox.files.read("/root/session.json")
+    with open(os.path.join(task_dir, "session.json"), "w") as f:
+        f.write(session)
+
+    _save_and_extract_zip(sandbox, "/root/screenshots.zip", task_dir, logger)
+    _save_and_extract_zip(sandbox, "/root/workspace_files.zip", task_dir, logger)
+
+    score = summary_data.get("summary", {}).get("avg_score", -1) if summary_data else -1
+    status = "PASS" if score == 100 else "FAIL" if score >= 0 else "ERROR"
+    steps = -1
+    duration_seconds = -1.0
+    response_length = -1
+    if summary_data and summary_data.get("tasks"):
+        task_steps = [t.get("steps", -1) for t in summary_data["tasks"] if t.get("steps", -1) >= 0]
+        if task_steps:
+            steps = sum(task_steps)
+        durs = [
+            t.get("duration_seconds")
+            for t in summary_data["tasks"]
+            if t.get("duration_seconds") is not None
+        ]
+        if durs:
+            duration_seconds = sum(durs)
+        else:
+            duration_seconds = latency_seconds
+        total_chars = 0
+        for t in summary_data["tasks"]:
+            for step in t.get("trajectory") or []:
+                total_chars += len((step.get("thought") or ""))
+            total_chars += len((t.get("final_text") or ""))
+        response_length = total_chars
+    if duration_seconds < 0:
+        duration_seconds = latency_seconds
+    tag = f"[{model_id}] {task_id}" if model_id else task_id
+    print(
+        f"[{status}] {tag} — score: {score}, steps: {steps}, 输出(计费): {response_length}, time: {duration_seconds:.1f}s"
+    )
+    return {
+        "task": task_id,
+        "model": model_id,
+        "score": score,
+        "status": status,
+        "steps": steps,
+        "response_length": response_length,
+        "latency_seconds": round(latency_seconds, 2),
+        "duration_seconds": round(duration_seconds, 2) if duration_seconds >= 0 else -1,
+    }
 
 
 if __name__ == "__main__":

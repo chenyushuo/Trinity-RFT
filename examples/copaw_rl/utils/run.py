@@ -15,8 +15,6 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import List
-
 import bench_client
 import requests
 import yaml
@@ -103,56 +101,17 @@ def session():
 
 
 def _inject_shared_eval_module(test_dir: str) -> None:
-    """将公共评测模块 copaw_eval.py 和 conftest.py 写入 tests/ 目录。
+    """将公共 conftest.py 写入 tests/ 目录（仅当 task 未自带时）。
 
-    copaw_eval.py 的源码由 batch_run.py 在注入时嵌入到全局变量
-    COPAW_EVAL_SOURCE 中。如果该变量不存在（本地调试），则尝试从
-    injection_server/ 同级目录读取。
+    copaw_eval.py 由 sandbox_utils.update_sandbox_files 在沙箱创建时
+    自动同步到 /root/，无需在此注入。
     """
     os.makedirs(test_dir, exist_ok=True)
-
-    # # 1. 写入 copaw_eval.py
-    # source = globals().get("COPAW_EVAL_SOURCE", "")
-    # if not source:
-    #     local_path = os.path.join(_SCRIPT_DIR, "copaw_eval.py")
-    #     if os.path.isfile(local_path):
-    #         with open(local_path, "r", encoding="utf-8") as f:
-    #             source = f.read()
-    # if source:
-    #     dest = os.path.join(test_dir, "copaw_eval.py")
-    #     with open(dest, "w", encoding="utf-8") as f:
-    #         f.write(source)
-    #     log.info("已注入公共评测模块: %s", dest)
-    # else:
-    #     log.warning("未找到 copaw_eval.py 源码，跳过注入")
-
-    # 2. 写入 conftest.py（仅当 task 未自带 conftest.py 时）
     conftest_path = os.path.join(test_dir, "conftest.py")
     if not os.path.exists(conftest_path):
         with open(conftest_path, "w", encoding="utf-8") as f:
             f.write(_CONFTEST_TEMPLATE)
         log.info("已注入公共 conftest.py: %s", conftest_path)
-
-
-def _extract_task_description(instruction_text: str) -> List[str]:
-    """从 instruction.md 中提取"任务说明"部分，去掉"期望输出"和"注意事项"等评测信息。"""
-    sections = re.split(r"^(## .+)$", instruction_text, flags=re.MULTILINE)
-    result_parts = []
-    capture = False
-    for part in sections:
-        if re.match(r"^## 任务说明", part):
-            capture = True
-            continue
-        elif re.match(r"^## ", part):
-            capture = False
-            continue
-        if capture:
-            result_parts.append(part.strip())
-    if result_parts:
-        result = str("\n\n".join(result_parts))
-    else:
-        result = instruction_text
-    return result.split("__END_OF_QUERY__")
 
 
 def _load_task_yaml(task_dir: str) -> dict | None:
@@ -458,8 +417,6 @@ def call_agent(
     # call agent
     response = requests.post(f"{url}/api/agent/process", json=payload, headers=headers, stream=True)
     response.raise_for_status()
-    # log.info("agent response: %s", response.text)
-
     # Consume the streaming response
     for chunk in response.iter_content(chunk_size=None):
         pass  # We don't need to process the stream output here
@@ -492,7 +449,7 @@ def parse_structured_trajectory(session_data: dict) -> list:  # noqa: C901
     各模型格式差异:
       - glm-5 / qwen3.5-plus / MiniMax: response 中有 thinking 块 + text 块
       - kimi-k2.5: response 中无 thinking 块，仅 text + tool_use
-      - 训练模型 (local-4b 等): response 中无 thinking 块，推理内容放在 text 块中
+      - 训练模型: response 中无 thinking 块，推理内容放在 text 块中
     """
     raw_trajectory = session_data.get("agent", {}).get("_model_trajectory", [])
     if not raw_trajectory:
@@ -1141,7 +1098,6 @@ def main():  # noqa: C901
             cwd=_SCRIPT_DIR,
             env=test_env,
         )
-        # sys.stdout.write(result.stdout or "")
         log.info("测试输出:\n%s", result.stdout)
         log.info("测试错误输出:\n%s", result.stderr)
         log.info("测试退出码: %d", result.returncode)
