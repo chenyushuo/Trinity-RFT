@@ -781,7 +781,9 @@ class SynchronizerConfigValidator(ConfigValidator):
                 )
 
         assert config.synchronizer.sync_interval > 0, "`sync_interval` must be positive."
-        set_if_none(config.synchronizer, "explorer_sync_interval", config.synchronizer.sync_interval)
+        set_if_none(
+            config.synchronizer, "explorer_sync_interval", config.synchronizer.sync_interval
+        )
         set_if_none(config.synchronizer, "trainer_sync_interval", config.synchronizer.sync_interval)
 
 
@@ -806,10 +808,14 @@ class IntervalConfigValidator(ConfigValidator):
         """
         if config.mode != "bench" and config.algorithm.algorithm_type not in {"dpo", "sft"}:  # TODO
             # check eval_interval
-            if config.explorer.eval_interval % config.synchronizer.explorer_sync_interval != 0:
+            explorer_sync_interval: int = config.synchronizer.explorer_sync_interval
+            if config.explorer.eval_interval % explorer_sync_interval != 0:
                 config.explorer.eval_interval = (
-                    max(config.explorer.eval_interval // config.synchronizer.explorer_sync_interval, 1)
-                ) * config.synchronizer.explorer_sync_interval
+                    max(
+                        config.explorer.eval_interval // explorer_sync_interval,
+                        1,
+                    )
+                ) * explorer_sync_interval
                 self.logger.warning(
                     "`eval_interval` is not a multiple of `explorer_sync_interval`; "
                     f"adjusted to the nearest integer={config.explorer.eval_interval}."

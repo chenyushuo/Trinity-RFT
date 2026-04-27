@@ -4,11 +4,11 @@ import argparse
 import asyncio
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
-import random
 
 import yaml
 
@@ -71,9 +71,11 @@ PREFIX_ALIASES: Dict[str, str] = {
     "qa": "qa",
     "chinese-qa": "chinese_qa",
     "chinese_qa": "chinese_qa",
+    "chinese_simpleqa": "chinese_qa",
     "bootstrap": "bootstrap",
     "boostrap": "bootstrap",
     "cron": "cron",
+    "mem": "memory",
     "memory": "memory",
     "nl2bash": "nl2bash",
     "skill": "skill",
@@ -94,7 +96,6 @@ PREFIX_DOMAIN: Dict[str, str] = {
     "xlsx": "fileprocess",
     "qa": "qa",
     "chinese_qa": "qa",
-    "chinese_simpleqa": "qa",
     "bootstrap": "bootstrap",
     "cron": "cron",
     "memory": "memory",
@@ -419,7 +420,7 @@ def llm_judge(
     )
     task_info = task_info_from_task_id(task_id=task_id, has_answer=has_answer)
     plan = select_judge_grader(task_info)
-    max_retries = 10
+    max_retries = 5
     base_sleep = 1.0
     last_error: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
@@ -443,18 +444,18 @@ def llm_judge(
                     exc,
                 )
                 sleep_time = base_sleep * (2 ** (attempt - 1))
-                jittered = sleep_time * random.uniform(0.5, 1.5)
+                jittered = sleep_time * random.uniform(0.8, 1.0)
                 time.sleep(jittered)
             else:
                 logger.error(
                     "llm_judge failed on final attempt %s/%s: %s",
-                    attempt, max_retries, exc,
+                    attempt,
+                    max_retries,
+                    exc,
                 )
     else:
         # Defensive fallback; the loop should either break or raise.
-        raise RuntimeError(
-            f"llm_judge failed after {max_retries} attempts"
-        ) from last_error
+        raise RuntimeError(f"llm_judge failed after {max_retries} attempts") from last_error
     info = (
         f"task_id={task_info.task_id}, prefix={task_info.prefix}, domain={task_info.domain}, "
         f"has_answer={task_info.has_answer}, final_score={score:.4f} | {details}"

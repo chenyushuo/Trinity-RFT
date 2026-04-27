@@ -78,6 +78,7 @@ def get_llm_model() -> OpenAIChatModel:
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ),
             temperature=0,
+            max_retries=6,
         )
     return _LLM_MODEL
 
@@ -94,6 +95,7 @@ def get_vl_model() -> OpenAIChatModel:
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ),
             temperature=0,
+            max_retries=6,
         )
     return _VL_MODEL
 

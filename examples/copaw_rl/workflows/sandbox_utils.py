@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Tuple
 
 import httpx
+import numpy as np
 from e2b import CommandExitException, NotFoundException, Sandbox
 
 
@@ -166,6 +167,9 @@ def get_or_create_sandbox(sandbox_id, token, domain, template, logger) -> Tuple[
 def launch_run_py(
     sandbox: Sandbox, cmd: str, oss_config, dashscope_api_key, logger, raise_error=False
 ):
+    assert dashscope_api_key, "DASHSCOPE_API_KEY is required to run the workflow"
+    dashscope_api_keys = dashscope_api_key.split(",")
+    dashscope_api_key = np.random.choice(dashscope_api_keys).item()
     t0 = time.perf_counter()
     try:
         logger.info(f"Running command in sandbox: {cmd}")
@@ -181,9 +185,9 @@ def launch_run_py(
             },
             timeout=3600,
             request_timeout=3600,
+            on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
+            on_stderr=lambda data: logger.info(f"[stderr]: {data.rstrip()}"),
         )
-        logger.info("result.stdout: %s", result.stdout.strip())
-        logger.info("result.stderr: %s", result.stderr.strip())
         run_outputs = result.stdout + "\n" + result.stderr
     except CommandExitException as e:
         logger.info("run.py exited with non-zero exit code: %s", e.exit_code)
@@ -346,16 +350,17 @@ if __name__ == "__main__":
     try:
         result = sandbox.commands.run(
             "pip uninstall copaw -y && "
-            "pip install qwenpaw==v1.1.3post1 && "
+            "pip install qwenpaw==v1.1.4post2 && "
             "pip install oss2 pytest py-openjudge pytest-asyncio && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/model_trajectory.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_openai_model.py < /root/patch/openai_model.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_model_response.py < /root/patch/model_response.patch && "
-            "python /root/fix_config.py",
+            "python /root/fix_config.py && "
+            "echo '100.118.58.9    copaw-dataset.oss-cn-beijing-internal.aliyuncs.com' >> /etc/hosts",
             timeout=3600,
+            on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
+            on_stderr=lambda data: logger.info(f"[stderr]: {data.rstrip()}"),
         )
-        logger.info("result.stdout: %s", result.stdout.strip())
-        logger.info("result.stderr: %s", result.stderr.strip())
     except CommandExitException as e:
         logger.info("Error stdout: %s", e.stdout.strip())
         logger.info("Error stderr: %s", e.stderr.strip())

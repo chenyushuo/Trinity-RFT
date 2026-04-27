@@ -234,7 +234,7 @@ class RunnerWrapper:
                         self.logger.error(status.message)
                 except asyncio.TimeoutError:
                     run_task_ref = None
-                    last_exception_msg = f"Timeout when running task of batch {task.batch_id} at runner {self.runner_id} at attempt {attempt + 1}: {task.task}"
+                    last_exception_msg = f"Timeout ({timeout} s) when running task of batch {task.batch_id} at runner {self.runner_id} at attempt {attempt + 1}: {task.task}"
                     self.logger.error(last_exception_msg)
                     status = Status(
                         completed_runs=0,
@@ -308,7 +308,13 @@ class Scheduler:
         self.default_timeout = config.explorer.max_timeout * (config.explorer.max_retry_times + 1)
         self.max_retry_times = config.explorer.max_retry_times
         self.max_repeat_times = config.explorer.max_repeat_times_per_runner
-        self.default_batch_size = config.buffer.batch_size
+        self.default_batch_size = (
+            config.buffer.batch_size * config.synchronizer.explorer_sync_interval  # type: ignore
+        )
+        if self.max_repeat_times is not None:
+            self.default_batch_size *= int(
+                np.ceil(config.algorithm.repeat_times / self.max_repeat_times)
+            )
         self.running = False
 
         self.runner_num = len(rollout_model) * config.explorer.runner_per_model
