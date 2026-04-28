@@ -36,6 +36,12 @@ from trinity.common.workflows.workflow import MathWorkflow, MultiTurnWorkflow, T
 from trinity.explorer.workflow_runner import WorkflowRunner
 
 
+def deserialize_experiences(exp_payload: bytes) -> list[Experience]:
+    if not exp_payload:
+        return []
+    return Experience.deserialize_many(exp_payload)
+
+
 @dataclass
 class MockResponse:
     response_text: str
@@ -691,6 +697,7 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
             status, exps = await runner.run_task(
                 task, batch_id="test", repeat_times=3, run_id_base=0
             )
+            exps = deserialize_experiences(exps)
 
             self.assertTrue(status.ok)
             self.assertIsInstance(exps, list)
@@ -706,6 +713,7 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
             status, exps = await runner.run_task(
                 task, batch_id="test", repeat_times=2, run_id_base=0
             )
+            exps = deserialize_experiences(exps)
             self.assertTrue(status.ok)
             self.assertIsInstance(exps, list)
             self.assertEqual(len(exps), 2)
@@ -745,6 +753,7 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
             status, exps = await runner.run_task(
                 task, batch_id="test", repeat_times=3, run_id_base=0
             )
+            exps = deserialize_experiences(exps)
 
             self.assertFalse(status.ok)
             self.assertEqual(status.completed_runs, expected_success_runs)
@@ -830,6 +839,7 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
                 run_id_base=0,
                 collect_partial_runs=False,
             )
+            exps = deserialize_experiences(exps)
 
             self.assertFalse(status.ok)
             self.assertEqual(status.completed_runs, 1)
@@ -928,6 +938,7 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
         status, exps = await runner.run_task(
             tasks[0], batch_id="test", repeat_times=2, run_id_base=0
         )  # test exception handling
+        exps = deserialize_experiences(exps)
         self.assertEqual(status.ok, False)
         self.assertEqual(len(exps), 0)
         exps = runner.model_wrapper.extract_experience_from_history(clear_history=False)
@@ -935,6 +946,7 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
         status, exps = await runner.run_task(
             tasks[1], batch_id="test", repeat_times=2, run_id_base=0
         )  # normal run
+        exps = deserialize_experiences(exps)
         self.assertEqual(status.ok, True)
         self.assertEqual(len(exps), 2)
         exps = runner.model_wrapper.extract_experience_from_history(clear_history=False)
@@ -1084,6 +1096,10 @@ class TestConcurrentWorkflowRunner(RayUnittestBaseAsync):
         self.assertTrue(async_status.ok)
         self.assertTrue(thread_status.ok)
         self.assertTrue(sequential_status.ok)
+
+        async_exps = deserialize_experiences(async_exps)
+        thread_exps = deserialize_experiences(thread_exps)
+        sequential_exps = deserialize_experiences(sequential_exps)
 
         self.assertEqual(len(async_exps), 8)
         self.assertEqual(len(thread_exps), 8)

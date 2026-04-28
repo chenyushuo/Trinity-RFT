@@ -37,7 +37,7 @@ class ExperiencePipeline:
     """
 
     def __init__(self, config: Config):
-        self.logger = get_logger(f"{config.explorer.name}_experience_pipeline", in_ray_actor=True)
+        self.logger = get_logger()
         load_plugins()
         self.config = config
         self.input_store = self._init_input_storage(config.data_processor.experience_pipeline)  # type: ignore [arg-type]
@@ -137,8 +137,20 @@ class ExperiencePipeline:
         Returns:
             Dict: A dictionary containing metrics collected during the processing of experiences.
         """
-        st = time.time()
         exps = Experience.deserialize_many(exp_bytes)
+        return await self._process_experiences(exps)
+
+    async def process_serialized_chunks(self, exp_chunks: list[bytes]) -> Dict:
+        """Process a batch assembled from multiple serialized task payloads."""
+        exps = []
+        for exp_bytes in exp_chunks:
+            if not exp_bytes:
+                continue
+            exps.extend(Experience.deserialize_many(exp_bytes))
+        return await self._process_experiences(exps)
+
+    async def _process_experiences(self, exps: list[Experience]) -> Dict:
+        st = time.time()
         if self.input_store is not None:
             await self.input_store.write_async(exps)
 

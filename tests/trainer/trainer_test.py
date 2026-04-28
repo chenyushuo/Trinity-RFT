@@ -738,8 +738,8 @@ class TestFullyAsyncMode(unittest.TestCase):
         self.assertIn("explorer1_runner_7.log", log_files)
         self.assertIn("explorer2_runner_0.log", log_files)
         self.assertIn("explorer2_runner_7.log", log_files)
-        self.assertIn("explorer1_experience_pipeline.log", log_files)
-        self.assertIn("explorer2_experience_pipeline.log", log_files)
+        self.assertIn("explorer1_rollout_coordinator.log", log_files)
+        self.assertIn("explorer2_rollout_coordinator.log", log_files)
         files_to_check = ["trainer.log", "synchronizer.log", "explorer1.log", "explorer2.log"]
         for file_name in files_to_check:
             with open(os.path.join(explorer1_config.checkpoint_job_dir, "log", file_name)) as f:

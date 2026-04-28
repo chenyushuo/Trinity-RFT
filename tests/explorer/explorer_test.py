@@ -5,7 +5,12 @@ import multiprocessing
 import os
 import random
 import shutil
+import time
+import unittest
+from collections import deque
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import httpx
 import ray
@@ -32,6 +37,94 @@ from trinity.common.constants import StorageType
 from trinity.explorer.explorer import Explorer
 from trinity.explorer.proxy.client import TrinityClient
 from trinity.manager.state_manager import StateManager
+
+
+def _build_fake_coordinator_explorer():
+    class FakeRemoteMethod:
+        def __init__(self, func):
+            self.func = func
+
+        async def remote(self, *args, **kwargs):
+            return await self.func(*args, **kwargs)
+
+    class FakeCoordinator:
+        def __init__(self):
+            self.submit_calls = []
+            self.finalize_train_calls = []
+            self.finalize_eval_calls = []
+            self.shutdown_calls = 0
+            self.submit_batch = FakeRemoteMethod(self._submit_batch)
+            self.finalize_train_batch = FakeRemoteMethod(self._finalize_train_batch)
+            self.finalize_eval_batch = FakeRemoteMethod(self._finalize_eval_batch)
+            self.shutdown = FakeRemoteMethod(self._shutdown)
+
+        async def _submit_batch(self, **kwargs):
+            self.submit_calls.append(kwargs)
+
+        async def _finalize_train_batch(self, batch_id):
+            self.finalize_train_calls.append(batch_id)
+            return {
+                "batch_id": batch_id,
+                "batch_type": "train",
+                "finished_task_count": 1,
+                "metrics": {
+                    "experience_pipeline/experience_count": 2.0,
+                    "rollout/run_metrics/mean": float(batch_id),
+                    "rollout/finished_task_count": 1.0,
+                },
+            }
+
+        async def _finalize_eval_batch(self, batch_id):
+            self.finalize_eval_calls.append(batch_id)
+            eval_name = batch_id.split("/", 1)[1]
+            return {
+                "batch_id": batch_id,
+                "batch_type": "eval",
+                "finished_task_count": 2,
+                "metrics": {
+                    f"eval/{eval_name}/accuracy": 0.5,
+                    f"eval/{eval_name}/finished_task_count": 2.0,
+                },
+            }
+
+        async def _shutdown(self):
+            self.shutdown_calls += 1
+
+    class FakeMonitor:
+        def __init__(self):
+            self.logged = []
+
+        def log(self, metric, step):
+            self.logged.append((step, metric))
+
+    feedback_calls = []
+
+    async def read_async():
+        return [SimpleNamespace(is_eval=False), SimpleNamespace(is_eval=False)]
+
+    def record_feedback(metrics):
+        feedback_calls.append(metrics)
+
+    explorer = Explorer.__new__(Explorer)
+    explorer.logger = MagicMock()
+    explorer.rollout_coordinator = FakeCoordinator()
+    explorer.monitor = FakeMonitor()
+    explorer.taskset = SimpleNamespace(read_async=read_async, feedback=record_feedback)
+    explorer.min_wait_num = None
+    explorer.pending_eval_tasks = deque()
+    explorer.explore_start_time = None
+    explorer.eval_start_time = None
+    explorer.last_monitored_step = 0
+    explorer.explore_step_num = 0
+    explorer.model_version = 7
+    explorer.detailed_stats = False
+    explorer.config = SimpleNamespace(
+        explorer=SimpleNamespace(
+            over_rollout=SimpleNamespace(return_partial_tasks=False),
+            eval_interval=1,
+        )
+    )
+    return explorer, feedback_calls
 
 
 class BaseExplorerCase(RayUnittestBase):
@@ -226,6 +319,71 @@ class TestExplorerGSM8k(BaseExplorerCase):
         ray.get(explorer.shutdown.remote())
 
 
+class TestExplorerCoordinatorPath(unittest.IsolatedAsyncioTestCase):
+    async def test_explore_step_submits_train_batch_to_rollout_coordinator(self):
+        explorer, _ = _build_fake_coordinator_explorer()
+
+        should_continue = await explorer.explore_step()
+
+        self.assertTrue(should_continue)
+        self.assertEqual(explorer.explore_step_num, 1)
+        self.assertEqual(
+            explorer.rollout_coordinator.submit_calls,
+            [
+                {
+                    "batch_id": 1,
+                    "tasks": [SimpleNamespace(is_eval=False), SimpleNamespace(is_eval=False)],
+                    "batch_type": "train",
+                    "min_wait_num": None,
+                }
+            ],
+        )
+
+    async def test_finish_current_steps_uses_rollout_coordinator_finalize(self):
+        explorer, feedback_calls = _build_fake_coordinator_explorer()
+        explorer.explore_step_num = 2
+
+        await explorer.finish_current_steps()
+
+        self.assertEqual(explorer.rollout_coordinator.finalize_train_calls, [1, 2])
+        self.assertEqual(len(feedback_calls), 2)
+        self.assertEqual([step for step, _ in explorer.monitor.logged], [1, 2])
+        self.assertEqual(explorer.last_monitored_step, 2)
+
+    async def test_finish_eval_step_uses_rollout_coordinator_finalize(self):
+        explorer, _ = _build_fake_coordinator_explorer()
+        explorer.pending_eval_tasks.append((3, "eval_set"))
+        explorer.eval_start_time = time.time()
+
+        await explorer._finish_eval_step(step=3)
+
+        self.assertEqual(explorer.rollout_coordinator.finalize_eval_calls, ["3/eval_set"])
+        self.assertEqual([step for step, _ in explorer.monitor.logged], [3])
+        self.assertIn("eval/eval_set/accuracy", explorer.monitor.logged[0][1])
+
+
+class TestExplorerCoordinatorPolicies(unittest.IsolatedAsyncioTestCase):
+    async def test_over_rollout_submits_partial_finalize_policy_to_rollout_coordinator(self):
+        explorer, _ = _build_fake_coordinator_explorer()
+        explorer.min_wait_num = 1
+        explorer.config.explorer.over_rollout.return_partial_tasks = True
+
+        should_continue = await explorer.explore_step()
+
+        self.assertTrue(should_continue)
+        self.assertEqual(
+            explorer.rollout_coordinator.submit_calls,
+            [
+                {
+                    "batch_id": 1,
+                    "tasks": [SimpleNamespace(is_eval=False), SimpleNamespace(is_eval=False)],
+                    "batch_type": "train",
+                    "min_wait_num": 1,
+                }
+            ],
+        )
+
+
 def run_serve(config):
     config.check_and_update()
     run_stage(config)
@@ -313,7 +471,7 @@ class ServeTest(RayUnittestBaseAsync):
         )
 
         # wait for explorer initialization
-        for i in range(30):
+        for i in range(50):
             try:
                 server_url = state_manager.load_explorer_server_url()
             except Exception:

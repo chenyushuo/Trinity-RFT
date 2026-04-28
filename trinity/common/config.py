@@ -157,6 +157,7 @@ class DynamicTimeoutConfig:
     """Config for dynamic timeout in explorer."""
 
     enable: bool = False
+    warmup_min_steps: int = 1  # only enable dynamic timeout after this many fully observed steps
     ratio: float = 3.0  # the timeout for each step will be min(max_timeout, average_time_per_task * dynamic_timeout.ratio)
 
 

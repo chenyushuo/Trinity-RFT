@@ -169,8 +169,8 @@ class ExplorerService:
         async with self.commit_lock:
             experiences = list(self.ready_experiences)
             self.ready_experiences.clear()
-            metrics = await self.explorer.experience_pipeline.process.remote(
-                Experience.serialize_many(experiences)
+            metrics = await self.explorer.rollout_coordinator.process_experiences.remote(
+                [Experience.serialize_many(experiences)]
             )
             metrics.update(self.collect_metrics())
             self.explorer.explore_step_num += 1

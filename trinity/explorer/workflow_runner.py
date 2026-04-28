@@ -398,11 +398,11 @@ class WorkflowRunner:
         repeat_times: int = 1,
         run_id_base: int = 0,
         collect_partial_runs: bool = True,
-    ) -> Tuple[Status, List[Experience]]:
+    ) -> Tuple[Status, bytes]:
         """Run the task and return the states."""
         # TODO: avoid sending the experiences back to the scheduler to reduce the communication overhead
+        st = time.time()
         try:
-            st = time.time()
             model_version = await self.model_wrapper.model_version_async
             self.runner_state["model_version"] = model_version
             self.logger.info(
@@ -436,9 +436,10 @@ class WorkflowRunner:
 
             if task.is_eval:
                 # If the task is an evaluation task, we do not record the experiences to the buffer
-                return status, []
+                return status, b""
             else:
-                return status, exps
+                exp_payload = Experience.serialize_many(exps)
+                return status, exp_payload
 
         except Exception as e:
             error_trace_back = traceback.format_exc()
@@ -450,7 +451,7 @@ class WorkflowRunner:
                     metrics=[{"time/run_execution": time.time() - st}],
                     message=error_trace_back.rstrip(),
                 ),
-                [],
+                b"",
             )
 
 
@@ -511,20 +512,23 @@ class DebugWorkflowRunner(WorkflowRunner):
         task = tasks[0]
         self.logger.info(f"Start debugging task:\n{task.raw_task}")
         if not self.enable_profiling:
-            status, exps = await self.run_task(
+            status, exp_payload = await self.run_task(
                 task=task, batch_id="debug", repeat_times=1, run_id_base=0
             )
         else:
             from viztracer import VizTracer
 
             with VizTracer(output_file=self.output_profiling_file):
-                status, exps = await self.run_task(
+                status, exp_payload = await self.run_task(
                     task=task, batch_id="debug", repeat_times=1, run_id_base=0
                 )
-        if not status.ok and len(exps) == 0:
-            exps = self.model_wrapper.extract_experience_from_history()
-            self.logger.info(f"Debugging failed, extracting {len(exps)} experiences from history.")
-        await self.sqlite_writer.write_async(exps)
+        experiences = Experience.deserialize_many(exp_payload) if exp_payload else []
+        if not status.ok and not experiences:
+            experiences = self.model_wrapper.extract_experience_from_history()
+            self.logger.info(
+                f"Debugging failed, extracting {len(experiences)} experiences from history."
+            )
+        await self.sqlite_writer.write_async(experiences)
         if status.ok:
             print(f"Task {task.task_id} completed successfully with metrics:\n{status.metrics}")
         else:
