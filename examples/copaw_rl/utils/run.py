@@ -398,6 +398,19 @@ def call_agent(
 
     headers = {"Referer": f"{url}/chat", "content-type": "application/json"}
 
+    # auto_eval.py → sandbox_utils.launch_run_py 注入的每请求 sampling kwargs
+    # （已分流：OpenAI 标准字段在顶层，vLLM 私有字段在 extra_body 里），
+    # 写进 provider 配置后 CoPaw 调 OpenAI 兼容接口时会作为 kwargs 下发。
+    generate_kwargs: dict = {}
+    gen_kwargs_str = os.environ.get("AUTO_EVAL_GENERATE_KWARGS")
+    if gen_kwargs_str:
+        try:
+            parsed = json.loads(gen_kwargs_str)
+            if isinstance(parsed, dict):
+                generate_kwargs = parsed
+        except json.JSONDecodeError:
+            log.warning("AUTO_EVAL_GENERATE_KWARGS 不是合法 JSON，已忽略: %s", gen_kwargs_str)
+
     if provider_name == RL_PROVIDER_NAME:
         result = config_provider(
             qwenpaw_url=url,
@@ -406,6 +419,7 @@ def call_agent(
             provider_model_id=provider_model_id,
             provider_api_key=provider_api_key,
             provider_model_name="rl-model",
+            generate_kwargs=generate_kwargs,
         )
         log.info("Provider configured and model activated successfully: %s", result)
     else:
@@ -415,6 +429,7 @@ def call_agent(
             provider_model_id=provider_model_id,
             provider_api_key=provider_api_key,
             provider_base_url=provider_base_url,
+            generate_kwargs=generate_kwargs,
         )
     # call agent
     response = requests.post(f"{url}/api/agent/process", json=payload, headers=headers, stream=True)

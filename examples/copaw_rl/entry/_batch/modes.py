@@ -10,6 +10,8 @@
 
 import argparse
 import asyncio
+import json
+import logging
 import os
 import random
 import re
@@ -25,7 +27,13 @@ from .constants import (
     RETRYABLE_STATUSES,
     STATUS_LABELS,
 )
-from .providers import build_provider_config, build_provider_config_from_json
+from .providers import (
+    build_provider_config,
+    build_provider_config_from_json,
+    sampling_params_to_generate_kwargs,
+)
+
+_log = logging.getLogger(__name__)
 from .results import (
     copy_non_retryable_results,
     load_error_tasks_from_dir,
@@ -155,6 +163,41 @@ class ResolvedModels:
         return bool(self.trial_groups)
 
 
+def _maybe_inject_sampling_env(items: list[dict]) -> None:
+    """从 --models-file 的多条 item 里读 sampling_params，注入 AUTO_EVAL_GENERATE_KWARGS。
+
+    - 没有任何 item 写 sampling_params → 跳过
+    - 已经存在 AUTO_EVAL_GENERATE_KWARGS（auto_eval.py 注入）→ 跳过，外层为准
+    - 多个 item 的 sampling_params 不一致 → 打 warning，按"第一个非空"为准
+      （batch_run 用全局 env 透传，无法每模型独立 sampling）
+    """
+    if os.environ.get("AUTO_EVAL_GENERATE_KWARGS"):
+        return  # auto_eval.py 已注入，外层为准
+
+    seen: list[tuple[str, dict]] = []  # [(key, sampling_params), ...]
+    for item in items:
+        sp = item.get("sampling_params") or {}
+        if sp:
+            seen.append((item.get("key", "?"), sp))
+    if not seen:
+        return
+
+    first_key, first_sp = seen[0]
+    inconsistent = [k for k, sp in seen[1:] if sp != first_sp]
+    if inconsistent:
+        _log.warning(
+            "[sampling_params] 多个模型 sampling_params 不一致，将统一使用 %s 的配置；"
+            "其余模型 (%s) 的 sampling_params 被忽略",
+            first_key, ", ".join(inconsistent),
+        )
+
+    gen_kwargs = sampling_params_to_generate_kwargs(first_sp)
+    payload = json.dumps(gen_kwargs, ensure_ascii=False)
+    os.environ["AUTO_EVAL_GENERATE_KWARGS"] = payload
+    _log.info("[sampling_params] 来自 --models-file [%s]，AUTO_EVAL_GENERATE_KWARGS=%s",
+              first_key, payload)
+
+
 def _resolve_base_models(args) -> tuple[list[str], dict[str, dict], dict[str, int]]:
     """解析 --models / --models-file（不展开 trial）。"""
     keys: list[str] = []
@@ -162,13 +205,14 @@ def _resolve_base_models(args) -> tuple[list[str], dict[str, dict], dict[str, in
     trial_counts: dict[str, int] = {}
 
     if args.models_file:
-        import json
         with open(args.models_file, "r", encoding="utf-8") as f:
-            for item in json.load(f):
-                key = item["key"]
-                keys.append(key)
-                configs[key] = build_provider_config_from_json(item)
-                trial_counts[key] = item.get("inference_trials", item.get("trial", 1))
+            items = json.load(f)
+        _maybe_inject_sampling_env(items)
+        for item in items:
+            key = item["key"]
+            keys.append(key)
+            configs[key] = build_provider_config_from_json(item)
+            trial_counts[key] = item.get("inference_trials", item.get("trial", 1))
     elif args.models:
         for m in args.models:
             keys.append(m)

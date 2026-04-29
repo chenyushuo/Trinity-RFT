@@ -183,18 +183,23 @@ def launch_run_py(
     dashscope_api_keys = dashscope_api_key.split(",")
     dashscope_api_key = np.random.choice(dashscope_api_keys).item()
     t0 = time.perf_counter()
+    envs = {
+        "OSS_ACCESS_KEY_ID": oss_config["access_key_id"],
+        "OSS_ACCESS_KEY_SECRET": oss_config["access_key_secret"],
+        "OSS_REGION": oss_config["region"],
+        "OSS_ENDPOINT": oss_config["endpoint"],
+        "OSS_BUCKET_NAME": oss_config["bucket_name"],
+        "DASHSCOPE_API_KEY": dashscope_api_key,
+    }
+    # auto_eval.py 注入的每请求 sampling kwargs（JSON 字符串），透传给沙箱里的 run.py
+    gen_kwargs = os.environ.get("AUTO_EVAL_GENERATE_KWARGS")
+    if gen_kwargs:
+        envs["AUTO_EVAL_GENERATE_KWARGS"] = gen_kwargs
     try:
         logger.info(f"Running command in sandbox: {cmd}")
         result = sandbox.commands.run(
             cmd,
-            envs={
-                "OSS_ACCESS_KEY_ID": oss_config["access_key_id"],
-                "OSS_ACCESS_KEY_SECRET": oss_config["access_key_secret"],
-                "OSS_REGION": oss_config["region"],
-                "OSS_ENDPOINT": oss_config["endpoint"],
-                "OSS_BUCKET_NAME": oss_config["bucket_name"],
-                "DASHSCOPE_API_KEY": dashscope_api_key,
-            },
+            envs=envs,
             timeout=1200,  # 30 min; was 3600
             request_timeout=1800,
             on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
