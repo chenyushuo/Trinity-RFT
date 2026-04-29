@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 import bench_client
 import requests
 import yaml
@@ -905,6 +907,37 @@ def _snapshot_workspace() -> dict[str, float]:
     return snapshot
 
 
+_QWENPAW_LOG_SOURCES: tuple[str, ...] = (
+    "/app/working/qwenpaw.log",
+    "/app/qwenpaw-app.log",
+    "/tmp/qwenpaw_query_error*",
+)
+
+
+def _export_qwenpaw_log() -> str | None:
+    """将 QwenPaw 运行日志打包为 _SCRIPT_DIR/qwenpaw_log.zip。
+
+    收集 /app/working/qwenpaw.log 以及 /tmp/qwenpaw_query_error* 匹配的所有文件，
+    以文件 basename 作为 zip 内的 arcname。若没有任何文件命中则跳过。
+    """
+    zip_path = os.path.join(_SCRIPT_DIR, "qwenpaw_log.zip")
+    collected: list[str] = []
+    for pattern in _QWENPAW_LOG_SOURCES:
+        for path in sorted(glob.glob(pattern)):
+            if os.path.isfile(path):
+                collected.append(path)
+
+    if not collected:
+        log.info("qwenpaw 日志文件不存在，跳过导出")
+        return None
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in collected:
+            zf.write(path, arcname=os.path.basename(path))
+    log.info("qwenpaw_log.zip 已生成: %s (%d 个文件)", zip_path, len(collected))
+    return zip_path
+
+
 def _save_summary(summary: dict) -> None:
     """将 summary JSON 写到文件。"""
     with open(SUMMARY_PATH, "w", encoding="utf-8") as f:
@@ -1030,6 +1063,9 @@ def main():  # noqa: C901
 
         # Step 5.6: 导出 workspace 中新增/修改的文件
         _export_workspace_files(baseline_snapshot=workspace_baseline)
+
+        # Step 5.7: 导出 QwenPaw 运行日志
+        _export_qwenpaw_log()
 
         # Step 6: 保存 traj 到 judge 所在的目录 /traj.json
         traj_path = os.path.join(test_dir, "traj.json")

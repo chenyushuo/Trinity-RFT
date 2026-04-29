@@ -281,6 +281,7 @@ def run_eval_workflow(
 
     _save_and_extract_zip(sandbox, "/root/screenshots.zip", task_dir, logger)
     _save_and_extract_zip(sandbox, "/root/workspace_files.zip", task_dir, logger)
+    _save_and_extract_zip(sandbox, "/root/qwenpaw_log.zip", task_dir, logger)
 
     score = summary_data.get("summary", {}).get("avg_score", -1) if summary_data else -1
     status = "PASS" if score == 100 else "FAIL" if score >= 0 else "ERROR"
@@ -380,6 +381,7 @@ def run_teacher_eval_workflow(
 
     _save_and_extract_zip(sandbox, "/root/screenshots.zip", task_dir, logger)
     _save_and_extract_zip(sandbox, "/root/workspace_files.zip", task_dir, logger)
+    _save_and_extract_zip(sandbox, "/root/qwenpaw_log.zip", task_dir, logger)
 
     score = summary_data.get("summary", {}).get("avg_score", -1) if summary_data else -1
     status = "PASS" if score == 100 else "FAIL" if score >= 0 else "ERROR"
