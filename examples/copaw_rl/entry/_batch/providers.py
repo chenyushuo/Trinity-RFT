@@ -3,6 +3,8 @@
 入口:
     build_provider_config(model_key)            — 给 --models 用
     build_provider_config_from_json(json_item)  — 给 --models-file 用
+    sampling_params_to_generate_kwargs(...)     — 共用：JSON 的 sampling_params
+                                                  → OpenAI client 可识别的 kwargs
 """
 
 import copy
@@ -10,6 +12,34 @@ import json
 import os
 
 from .constants import MODELS, PROVIDER_BASE
+
+
+# OpenAI ChatCompletion 标准字段；其余字段（top_k / min_p / repetition_penalty
+# 等 vLLM 私有参数）会被收进 extra_body 透传给后端，OpenAI Python SDK 才不会
+# 因为未知顶层 kwargs 而报错。
+_OPENAI_STD_SAMPLING_FIELDS = frozenset({
+    "temperature", "top_p", "presence_penalty", "frequency_penalty",
+    "max_tokens", "max_completion_tokens", "n", "stop", "seed",
+    "logprobs", "top_logprobs", "logit_bias", "stream", "response_format",
+})
+
+
+def sampling_params_to_generate_kwargs(sampling_params: dict) -> dict:
+    """JSON 里的 sampling_params → OpenAI client 可识别的 generate_kwargs。
+
+    标准字段直接放顶层；非标字段（vLLM/dashscope 私有）塞 extra_body。
+    auto_eval.py 与 batch_run.py 共用。
+    """
+    std: dict = {}
+    extra: dict = {}
+    for k, v in sampling_params.items():
+        if k in _OPENAI_STD_SAMPLING_FIELDS:
+            std[k] = v
+        else:
+            extra[k] = v
+    if extra:
+        std["extra_body"] = extra
+    return std
 
 
 def _ensure_extra_model(cfg: dict) -> None:

@@ -16,6 +16,29 @@ batch_run.py — 批量运行 benchmark 任务的入口（薄壳）。
   python batch_run.py --retry-from result/20260330/20260330_213935 --retry-errors 3
 
   nohup env PYTHONUNBUFFERED=1 python batch_run.py --models-file models.json --package search --parallel 16 &
+
+为请求注入采样参数（temperature / top_p / top_k / min_p / presence_penalty /
+repetition_penalty 等），有两种方式（dashscope / 本地 vLLM 都适用）:
+
+  方式 A — 手动 export env（适合 --models 直接跑预设模型）:
+      export AUTO_EVAL_GENERATE_KWARGS='{"temperature":1.0,"top_p":0.95,
+        "presence_penalty":1.5,"extra_body":{"top_k":20,"min_p":0.0,
+        "repetition_penalty":1.0}}'
+      python batch_run.py --models qwen3.6-plus --package search
+
+  方式 B — 在 --models-file JSON 里加 sampling_params 字段（自动注入 env）:
+      [{"key":"qwen3.6-plus","provider_id":"dashscope","model":"qwen3.6-plus",
+        "sampling_params":{"temperature":1.0,"top_p":0.95,"top_k":20,
+                           "min_p":0.0,"presence_penalty":1.5,
+                           "repetition_penalty":1.0}}]
+      python batch_run.py --models-file dashscope_eval.json
+
+  规则:
+    - OpenAI 标准字段（temperature/top_p/presence_penalty 等）会放顶层
+    - 非标字段（top_k/min_p/repetition_penalty 等）自动塞 extra_body 透传
+    - 若 --models-file 里多个模型的 sampling_params 不一致，按第一个非空为准
+      （batch_run 用全局 env 透传，无法每模型独立采样）
+    - 已设外部 env 时 --models-file 内的值不会再覆盖
 """
 
 import asyncio

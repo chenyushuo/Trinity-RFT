@@ -27,7 +27,19 @@ auto_eval.py — vLLM 部署 + benchmark 评测流水线。
     tp / dp         tensor / data parallel size
     dtype           默认 bfloat16
     tool_call_parser 默认 qwen3_xml
-    extra_args      vLLM 额外启动参数
+    extra_args      vLLM serve 启动期额外 CLI 参数（如 --gpu-memory-utilization）
+    sampling_params 采样参数（temperature / top_p / top_k / min_p /
+                    presence_penalty / repetition_penalty 等）。
+                    会同时走两条路径以确保完整生效：
+                      ① 启动期 --override-generation-config 固化给 vLLM
+                         （仅 HF GenerationConfig 标准字段被 vLLM 接受，即
+                         temperature/top_p/top_k/min_p/repetition_penalty）
+                      ② 通过 AUTO_EVAL_GENERATE_KWARGS env 透传到 sandbox
+                         的 run.py，再写进 QwenPaw provider 配置，CoPaw 调
+                         OpenAI 兼容接口时把这些值作为每请求 kwargs 下发
+                         （覆盖 ① 中的服务端默认值，且能让 presence_penalty
+                         这种非 HF 标准字段也生效）
+                    仅作用于 vLLM 评测路径，不影响 dashscope 直连。
     inference_trials 同模型重复推理次数（默认 1，与 grading_trials 不同概念）
     max_model_len   默认 98304
     model_id        覆盖 model_path 作为 OpenAI 兼容 API 的 model 字段
@@ -48,6 +60,7 @@ import time
 import urllib.request
 from datetime import datetime
 
+from _batch.providers import sampling_params_to_generate_kwargs
 from _batch.summary import print_trial_summary
 
 # ---------------------------------------------------------------------------
@@ -321,8 +334,14 @@ def _launch_vllm(
         "--port", str(port),
         "--max-model-len", str(model_cfg.get("max_model_len", 98304)),
         "--enable-prefix-caching",
-        *model_cfg.get("extra_args", []),
     ]
+    sampling_params = model_cfg.get("sampling_params") or {}
+    if sampling_params:
+        cmd += [
+            "--override-generation-config",
+            json.dumps(sampling_params, ensure_ascii=False),
+        ]
+    cmd += list(model_cfg.get("extra_args", []))
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in use_gpus)
@@ -431,9 +450,16 @@ def _run_batch(
     env["AUTO_EVAL_MODEL_KEY"] = key
     env["RESULT_DATE_PREFIX"] = date_str
 
+    sampling = model_cfg.get("sampling_params") or {}
+    if sampling:
+        gen_kwargs = sampling_params_to_generate_kwargs(sampling)
+        env["AUTO_EVAL_GENERATE_KWARGS"] = json.dumps(gen_kwargs, ensure_ascii=False)
+
     log.info("  命令: %s", " ".join(cmd))
     log.info("  AUTO_EVAL_BASE_URL=%s", env["AUTO_EVAL_BASE_URL"])
     log.info("  AUTO_EVAL_MODEL_ID=%s", model_id)
+    if "AUTO_EVAL_GENERATE_KWARGS" in env:
+        log.info("  AUTO_EVAL_GENERATE_KWARGS=%s", env["AUTO_EVAL_GENERATE_KWARGS"])
     return subprocess.run(cmd, env=env).returncode
 
 

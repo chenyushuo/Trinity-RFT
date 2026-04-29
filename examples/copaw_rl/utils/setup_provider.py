@@ -93,6 +93,7 @@ def config_provider(
     provider_model_name: str = None,
     provider_api_key: str = "",
     provider_chat_model: str = "OpenAIChatModel",
+    generate_kwargs: dict = None,
     agent_id: str = None,
 ):
     base = _detect_api_base(qwenpaw_url)
@@ -124,6 +125,7 @@ def config_provider(
                 "api_key": provider_api_key or None,
                 "base_url": provider_base_url or None,
                 "chat_model": provider_chat_model,
+                "generate_kwargs": generate_kwargs or {},
             },
         )
         if config_resp.status_code not in (200, 201):
@@ -138,11 +140,16 @@ def config_provider(
                 response=config_resp,
             )
     else:
-        # 更新 api_key（创建接口不含 api_key，需单独配置）
+        # 创建接口不含 api_key / generate_kwargs，需单独 PUT 补充
+        extra_config: dict = {}
         if provider_api_key:
+            extra_config["api_key"] = provider_api_key
+        if generate_kwargs:
+            extra_config["generate_kwargs"] = generate_kwargs
+        if extra_config:
             config_resp = requests.put(
                 f"{base}/models/{provider_id}/config",
-                json={"api_key": provider_api_key},
+                json=extra_config,
             )
             config_resp.raise_for_status()
 
