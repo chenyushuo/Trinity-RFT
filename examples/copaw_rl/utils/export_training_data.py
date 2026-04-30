@@ -179,6 +179,7 @@ def export_training_data(task_id, trajectories, session_data=None, input_answer=
     dataset = []
     last_full_token_ids = last_full_length = None
     for trajectory in trajectories:
+        meesages = trajectory["messages"]
         logprobs = trajectory["logprobs"]
         prompt_token_ids = trajectory["prompt_token_ids"]
         token_ids = trajectory["token_ids"]
@@ -212,6 +213,7 @@ def export_training_data(task_id, trajectories, session_data=None, input_answer=
                 "token_ids": token_ids,
                 "response_mask": [1] * len(token_ids),
                 "reward": reward,
+                "messages": meesages,
             }
             dataset.append(data)
 

@@ -1,12 +1,95 @@
 import time
 from typing import List, Optional
 
+import qwen_vl_utils
 import torch
+import transformers
+from qwen_vl_utils import process_vision_info
 
 from trinity.common.experience import Experience
+from trinity.common.models.mm_utils import build_mm_input_for_training
 from trinity.common.models.model import ModelWrapper
 from trinity.common.workflows import WORKFLOWS
 from trinity.common.workflows.workflow import MultiTurnWorkflow, Task
+
+
+def patch_qwen_vl_utils():
+    if getattr(qwen_vl_utils, "_is_patched", False):
+        return
+
+    from qwen_vl_utils.vision_process import (
+        IMAGE_MAX_TOKEN_NUM,
+        IMAGE_MIN_TOKEN_NUM,
+        SPATIAL_MERGE_SIZE,
+        BytesIO,
+        Dict,
+        Image,
+        Union,
+        base64,
+        copy,
+        requests,
+        smart_resize,
+        to_rgb,
+    )
+
+    def new_fetch_image(
+        ele: Dict[str, Union[str, Image.Image]], image_patch_size: int = 14
+    ) -> Image.Image:
+        if "image" in ele:
+            image = ele["image"]
+        else:
+            image = ele["image_url"]
+            if isinstance(image, dict) and "url" in image:
+                image = image["url"]
+
+        image_obj = None
+        patch_factor = int(image_patch_size * SPATIAL_MERGE_SIZE)
+        if isinstance(image, Image.Image):
+            image_obj = image
+        elif image.startswith("http://") or image.startswith("https://"):
+            with requests.get(image, stream=True) as response:
+                response.raise_for_status()
+                with BytesIO(response.content) as bio:
+                    image_obj = copy.deepcopy(Image.open(bio))
+        elif image.startswith("file://"):
+            image_obj = Image.open(image[7:])
+        elif image.startswith("data:image"):
+            if "base64," in image:
+                _, base64_data = image.split("base64,", 1)
+                data = base64.b64decode(base64_data)
+                with BytesIO(data) as bio:
+                    image_obj = copy.deepcopy(Image.open(bio))
+        else:
+            image_obj = Image.open(image)
+        if image_obj is None:
+            raise ValueError(
+                f"Unrecognized image input, support local path, http url, base64 and PIL.Image, got {image}"
+            )
+        image = to_rgb(image_obj)
+
+        ## resize
+        if "resized_height" in ele and "resized_width" in ele:
+            resized_height, resized_width = smart_resize(
+                ele["resized_height"],
+                ele["resized_width"],
+                factor=patch_factor,
+            )
+        else:
+            width, height = image.size
+            min_pixels = ele.get("min_pixels", IMAGE_MIN_TOKEN_NUM * patch_factor**2)
+            max_pixels = ele.get("max_pixels", IMAGE_MAX_TOKEN_NUM * patch_factor**2)
+            resized_height, resized_width = smart_resize(
+                height,
+                width,
+                factor=patch_factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+        image = image.resize((resized_width, resized_height))
+        return image
+
+    qwen_vl_utils.vision_process.fetch_image = new_fetch_image
+    qwen_vl_utils._is_patched = True
 
 
 @WORKFLOWS.register_module("copaw_workflow")
@@ -29,6 +112,8 @@ class CoPawWorkflow(MultiTurnWorkflow):
             get_or_create_sandbox,
             run_workflow,
         )
+
+        patch_qwen_vl_utils()
 
         start_time = time.time()
         sandbox_id = self.task.workflow_args.get("sandbox_id", None)
@@ -61,6 +146,7 @@ class CoPawWorkflow(MultiTurnWorkflow):
             sandbox.kill()
 
         exps = []
+        processor = None
         for data in dataset:
             prompt_token_ids = torch.tensor(data["prompt_token_ids"])
             response_token_ids = torch.tensor(data["token_ids"])
@@ -72,6 +158,31 @@ class CoPawWorkflow(MultiTurnWorkflow):
             metrics = {
                 "reward": reward,
             }
+
+            messages = data["messages"]
+            with open("debug_messsages.pkl", "wb") as f:
+                import pickle
+
+                pickle.dump(messages, f)
+            image_inputs, video_inputs = process_vision_info(messages)
+            if image_inputs or video_inputs:
+                if processor is None:
+                    processor = transformers.AutoProcessor.from_pretrained(model_path)
+                multi_modal_data = {}
+                if image_inputs:
+                    multi_modal_data["image_inputs"] = image_inputs
+                if video_inputs:
+                    multi_modal_data["video_inputs"] = video_inputs
+                prompt = processor.decode(token_ids)
+
+                multi_modal_inputs = build_mm_input_for_training(
+                    processor, prompt, multi_modal_data
+                )
+                multi_modal_inputs.pop("input_ids", None)
+                multi_modal_inputs.pop("attention_mask", None)
+            else:
+                multi_modal_inputs = None
+
             exp = Experience(
                 tokens=token_ids,
                 logprobs=logprobs,
@@ -79,8 +190,10 @@ class CoPawWorkflow(MultiTurnWorkflow):
                 action_mask=action_mask,
                 reward=reward,
                 metrics=metrics,
+                multi_modal_inputs=multi_modal_inputs,
             )
             exps.append(exp)
+        del processor
 
         self.logger.info(
             f"Workflow finished in {time.time() - start_time:.2f} seconds. Sandbox {'created' if created else 'connected'} "

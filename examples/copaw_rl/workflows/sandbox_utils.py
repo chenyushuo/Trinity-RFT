@@ -462,10 +462,8 @@ if __name__ == "__main__":
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_openai_model.py < /root/patch/openai_model.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_model_response.py < /root/patch/model_response.patch && "
             "apt-get update && "
-            "DEBIAN_FRONTEND=noninteractive apt-get install -y x11vnc openbox && "
-            "git clone --depth 1 https://github.com/novnc/noVNC.git /opt/noVNC && "
-            "git clone --depth 1 --branch v0.12.0 https://github.com/novnc/websockify.git /opt/noVNC/utils/websockify && "
-            "ln -s /opt/noVNC/vnc.html /opt/noVNC/index.html && "
+            "apt-get install -y xfce4 xfce4-goodies x11vnc openbox xvfb novnc websockify supervisor dbus-x11 && "
+            "rm -rf /var/lib/apt/lists/* && "
             "echo '100.118.58.9    copaw-dataset.oss-cn-beijing-internal.aliyuncs.com' >> /etc/hosts",
             timeout=3600,
             on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
