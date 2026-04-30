@@ -26,7 +26,9 @@ Architectural notes (现行)：
     ``_high_variance`` 标记提示人工复核。
 """
 
-from openjudge.models.schema.prompt_template import LanguageEnum  # noqa: F401  (re-exported for convenience)
+from openjudge.models.schema.prompt_template import (  # noqa: F401  (re-exported for convenience)
+    LanguageEnum,
+)
 
 from ._core import (
     SAFETY_REFUSE_WARN_PATTERNS,

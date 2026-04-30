@@ -17,11 +17,17 @@ import subprocess
 import sys
 import time
 import zipfile
+from typing import List
+
 import bench_client
 import requests
 import yaml
 from export_training_data import export_training_data
-from setup_provider import config_builtin_provider, config_provider
+from setup_provider import (
+    config_builtin_provider,
+    config_provider,
+    put_tool_guard_settings,
+)
 
 # 脚本自身所在目录
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -114,6 +120,27 @@ def _inject_shared_eval_module(test_dir: str) -> None:
         with open(conftest_path, "w", encoding="utf-8") as f:
             f.write(_CONFTEST_TEMPLATE)
         log.info("已注入公共 conftest.py: %s", conftest_path)
+
+
+def _extract_task_description(instruction_text: str) -> List[str]:
+    """从 instruction.md 中提取"任务说明"部分，去掉"期望输出"和"注意事项"等评测信息。"""
+    sections = re.split(r"^(## .+)$", instruction_text, flags=re.MULTILINE)
+    result_parts = []
+    capture = False
+    for part in sections:
+        if re.match(r"^## 任务说明", part):
+            capture = True
+            continue
+        elif re.match(r"^## ", part):
+            capture = False
+            continue
+        if capture:
+            result_parts.append(part.strip())
+    if result_parts:
+        result = str("\n\n".join(result_parts))
+    else:
+        result = instruction_text
+    return result.split("__END_OF_QUERY__")
 
 
 def _load_task_yaml(task_dir: str) -> dict | None:
@@ -367,7 +394,7 @@ def _deploy_skills(skills_dir: str, workspace: str) -> None:
     log.info("skill manifest written: %s (%d skills)", manifest_path, len(deployed))
 
 
-def call_agent(
+def call_agent(  # noqa: C901
     url: str,
     user_input: str | list,
     session_id: str,
@@ -411,6 +438,11 @@ def call_agent(
         except json.JSONDecodeError:
             log.warning("AUTO_EVAL_GENERATE_KWARGS 不是合法 JSON，已忽略: %s", gen_kwargs_str)
 
+    # 关闭 tool guard
+    result = put_tool_guard_settings(url)
+    log.info("put_tool_guard_settings: %s", result)
+
+    # 设置provider配置并激活模型（如果provider_name是RL_PROVIDER_NAME，则调用config_provider，否则调用config_builtin_provider）
     if provider_name == RL_PROVIDER_NAME:
         result = config_provider(
             qwenpaw_url=url,
@@ -436,7 +468,43 @@ def call_agent(
     response.raise_for_status()
     # Consume the streaming response
     for chunk in response.iter_content(chunk_size=None):
-        pass  # We don't need to process the stream output here
+        if not chunk:
+            continue
+
+        text = chunk.decode("utf-8", errors="ignore").strip()
+        if not text:
+            continue
+
+        if text.startswith("data:"):
+            text = text[len("data:") :].strip()
+
+        if text == "[DONE]":
+            break
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            log.warning("failed to parse stream chunk: %r", text)
+            continue
+
+        for choice in data.get("choices", []):
+            if not chunk:
+                continue
+            delta = choice.get("delta", {})
+
+            # 新版
+            for tool_call in delta.get("tool_calls", []) or []:
+                function = tool_call.get("function", {}) or {}
+                name = function.get("name")
+                if name:
+                    log.info("function call name: %s", name)
+
+            # 旧版
+            function_call = delta.get("function_call")
+            if function_call:
+                name = function_call.get("name")
+                if name:
+                    log.info("function call name: %s", name)
 
 
 # this function is used to extract raw trajectories from session data

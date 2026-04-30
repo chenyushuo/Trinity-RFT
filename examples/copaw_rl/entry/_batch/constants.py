@@ -323,7 +323,6 @@ MODELS = {
     "qwen3.5-397b-a17b": {"provider_id": "dashscope", "model": "qwen3.5-397b-a17b"},
     "qwen3.6-35b-a3b": {"provider_id": "dashscope", "model": "qwen3.6-35b-a3b"},
     "qwen3.5-27b": {"provider_id": "dashscope", "model": "qwen3.5-27b"},
-    
 }
 
 DEFAULT_MODEL = "qwen3.5-plus"

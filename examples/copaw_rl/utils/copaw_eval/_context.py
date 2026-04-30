@@ -111,12 +111,14 @@ def _extract_tool_call_results(
             name = item.get("name", "")
             if tool_names and name not in tool_names:
                 continue
-            calls.append({
-                "id": item.get("id", ""),
-                "name": name,
-                "input": json.dumps(item.get("input", {}), ensure_ascii=False)[:5000],
-                "output": "",
-            })
+            calls.append(
+                {
+                    "id": item.get("id", ""),
+                    "name": name,
+                    "input": json.dumps(item.get("input", {}), ensure_ascii=False)[:5000],
+                    "output": "",
+                }
+            )
 
     for entry in traj:
         for msg in entry.get("messages", []):
@@ -137,22 +139,29 @@ def _extract_tool_call_results(
 # ---------------------------------------------------------------------------
 
 _BROWSER_SKIP_ACTIONS = {
-    "open", "click", "wait_for", "stop", "navigate",
-    "handle_dialog", "start", "type", "fill", "scroll",
+    "open",
+    "click",
+    "wait_for",
+    "stop",
+    "navigate",
+    "handle_dialog",
+    "start",
+    "type",
+    "fill",
+    "scroll",
 }
 
 _SNAPSHOT_STRIP_RES: list[re.Pattern] = [
     re.compile(r"^\s*- /url:.*$", re.MULTILINE),
     re.compile(r"^\s*- img\b.*$", re.MULTILINE),
     re.compile(
-        r"^\s*- (?:document|iframe|banner|complementary|navigation"
-        r"|button|searchbox)\b[^\"]*$",
+        r"^\s*- (?:document|iframe|banner|complementary|navigation" r"|button|searchbox)\b[^\"]*$",
         re.MULTILINE,
     ),
     re.compile(r"^\s*- (?:list|listitem):?\s*$", re.MULTILINE),
     re.compile(r"\s*\[ref=e\d+\]"),
     re.compile(r"\s*\[nth=\d+\]"),
-    re.compile(r"\s*\[level=\d+\]")
+    re.compile(r"\s*\[level=\d+\]"),
 ]
 _SNAPSHOT_BLANK_LINES_RE = re.compile(r"\n{2,}")
 
@@ -176,14 +185,14 @@ def _clean_browser_output(output: str) -> str:
         marker = '"snapshot": "'
         idx = output.find(marker)
         if idx >= 0:
-            raw = output[idx + len(marker):]
+            raw = output[idx + len(marker) :]
             text = raw.replace("\\n", "\n").replace('\\"', '"')
         else:
             return output
 
     for pat in _SNAPSHOT_STRIP_RES:
         text = pat.sub("", text)
-    text = _SNAPSHOT_BLANK_LINES_RE.sub("\n", text)
+    text = _SNAPSHOT_BLANK_LINES_RE.sub("\n", text)  # type: ignore
     return text.strip()
 
 
@@ -215,10 +224,12 @@ def _content_fingerprint(text: str) -> str:
 # 当 shell 命令包含 curl/wget 且含 http(s):// URL 时识别，并对返回 HTML 剥噪。
 
 _SHELL_HTTP_RE = re.compile(
-    r"\b(curl|wget|fetch)\b[^\n]*\bhttps?://", re.IGNORECASE,
+    r"\b(curl|wget|fetch)\b[^\n]*\bhttps?://",
+    re.IGNORECASE,
 )
 _HTML_SCRIPT_STYLE_RE = re.compile(
-    r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL,
+    r"<(script|style)\b[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
 )
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _MULTI_BLANK_RE = re.compile(r"\n{3,}")
@@ -252,6 +263,7 @@ def _clean_curl_output(output: str) -> str:
 # ---------------------------------------------------------------------------
 # Unified tool-output pipeline
 # ---------------------------------------------------------------------------
+
 
 def _clean_tool_output(call: dict) -> str:
     """根据工具类型派发到对应 cleaner，返回清洗后的文本（空字符串=本调用应跳过）。
@@ -302,7 +314,7 @@ def build_unified_entries(session: dict) -> list[tuple[str, str]]:
             continue
         if fp:
             seen_fingerprints.append(fp)
-        header = f"[Tool {i}] {c.get('name','')}: {(c.get('input','') or '')[:2000]}"
+        header = f"[Tool {i}] {c.get('name', '')}: {(c.get('input', '') or '')[:2000]}"
         entries.append((header, cleaned))
     return entries
 
@@ -362,6 +374,7 @@ def _get_context(session: dict) -> str:
 # Agent capability context (注入给 hallucination grader 防止误判内置技能)
 # ---------------------------------------------------------------------------
 
+
 def extract_agent_capability_context(session: dict, max_chars: int = 3000) -> str:
     """从 session 中提取 Agent 的能力上下文（skill 列表、工具说明等）。
 
@@ -396,7 +409,8 @@ def extract_agent_capability_context(session: dict, max_chars: int = 3000) -> st
             content = msgs[0].get("content", "")
             if isinstance(content, list):
                 content = " ".join(
-                    b.get("text", "") for b in content
+                    b.get("text", "")
+                    for b in content
                     if isinstance(b, dict) and b.get("type") == "text"
                 )
             if isinstance(content, str):

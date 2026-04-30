@@ -98,10 +98,12 @@ def _setup_logging(date_str: str, start_ts: str) -> str:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    for handler in (logging.FileHandler(log_file, encoding="utf-8"),
-                    logging.StreamHandler(sys.stdout)):
+    for handler in (
+        logging.FileHandler(log_file, encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ):
         handler.setFormatter(fmt)
-        root.addHandler(handler)
+        root.addHandler(handler)  # type: ignore
     return log_file
 
 
@@ -254,10 +256,7 @@ def _free_port_or_raise(port: int) -> None:
         (safe_to_kill if _is_vllm_process(pid) else untouchable).append(pid)
 
     if untouchable:
-        raise RuntimeError(
-            f"端口 {port} 被非 vLLM 进程占用 PID={untouchable}，拒绝 kill。"
-            "请人工排查后重试。"
-        )
+        raise RuntimeError(f"端口 {port} 被非 vLLM 进程占用 PID={untouchable}，拒绝 kill。" "请人工排查后重试。")
 
     log.warning("  端口 %d 被残留 vLLM 进程占用 PID=%s，主动清理 ...", port, safe_to_kill)
     for pid in safe_to_kill:
@@ -305,9 +304,7 @@ def _preexec_setsid_and_pdeathsig() -> None:
             pass
 
 
-def _launch_vllm(
-    model_cfg: dict, gpus: list[int], port: int, date_str: str
-) -> subprocess.Popen:
+def _launch_vllm(model_cfg: dict, gpus: list[int], port: int, date_str: str) -> subprocess.Popen:
     """启动 vLLM serve；返回 Popen 对象。
 
     保护机制:
@@ -325,14 +322,22 @@ def _launch_vllm(
     _free_port_or_raise(port)
 
     cmd = [
-        VLLM_BIN, "serve", model_cfg["model_path"],
-        "--dtype", model_cfg.get("dtype", "bfloat16"),
+        VLLM_BIN,
+        "serve",
+        model_cfg["model_path"],
+        "--dtype",
+        model_cfg.get("dtype", "bfloat16"),
         "--enable-auto-tool-choice",
-        "--tool-call-parser", model_cfg.get("tool_call_parser", "qwen3_xml"),
-        "--tensor-parallel-size", str(tp),
-        "--data-parallel-size", str(dp),
-        "--port", str(port),
-        "--max-model-len", str(model_cfg.get("max_model_len", 98304)),
+        "--tool-call-parser",
+        model_cfg.get("tool_call_parser", "qwen3_xml"),
+        "--tensor-parallel-size",
+        str(tp),
+        "--data-parallel-size",
+        str(dp),
+        "--port",
+        str(port),
+        "--max-model-len",
+        str(model_cfg.get("max_model_len", 98304)),
         "--enable-prefix-caching",
     ]
     sampling_params = model_cfg.get("sampling_params") or {}
@@ -351,11 +356,16 @@ def _launch_vllm(
 
     vllm_log_dir = os.path.join(LOG_BASE, date_str, "vllm_logs")
     os.makedirs(vllm_log_dir, exist_ok=True)
-    log_file = os.path.join(vllm_log_dir, f"{model_cfg['key']}_{datetime.now().strftime('%H%M%S')}.log")
+    log_file = os.path.join(
+        vllm_log_dir, f"{model_cfg['key']}_{datetime.now().strftime('%H%M%S')}.log"
+    )
     fout = open(log_file, "w")
 
     proc = subprocess.Popen(
-        cmd, env=env, stdout=fout, stderr=subprocess.STDOUT,
+        cmd,
+        env=env,
+        stdout=fout,
+        stderr=subprocess.STDOUT,
         preexec_fn=_preexec_setsid_and_pdeathsig,
     )
     _active_vllm_procs.append(proc)
@@ -434,9 +444,7 @@ def _install_signal_handlers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_batch(
-    model_cfg: dict, port: int, batch_args: list[str], date_str: str
-) -> int:
+def _run_batch(model_cfg: dict, port: int, batch_args: list[str], date_str: str) -> int:
     """调用 batch_run.py 跑评测，返回 exit code。"""
     key = model_cfg["key"]
     model_id = model_cfg.get("model_id", model_cfg["model_path"])
@@ -481,7 +489,10 @@ def _build_batch_args(args: argparse.Namespace) -> list[str]:
 
 
 def _collect_trial_summary(
-    result_day_dir: str, existing_dirs: set[str], base_key: str, t: int,
+    result_day_dir: str,
+    existing_dirs: set[str],
+    base_key: str,
+    t: int,
     trial_data: dict[str, list[dict]],
 ) -> None:
     """vLLM 运行完一次后，找出新生成的 batch 目录读 _batch_summary.json。"""
@@ -568,13 +579,17 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="自动化 vLLM 部署 + benchmark 评测流水线")
     p.add_argument("--config", required=True, help="模型配置 JSON 文件路径")
     p.add_argument(
-        "--gpus", type=str, default=None,
+        "--gpus",
+        type=str,
+        default=None,
         help="指定 GPU 编号，逗号分隔（如 2,3,4,5）。不指定则自动检测空闲 GPU",
     )
     p.add_argument(
-        "--port", type=int, default=None,
+        "--port",
+        type=int,
+        default=None,
         help=f"vLLM 服务端口；不指定则在 {DEFAULT_PORT_RANGE[0]}-{DEFAULT_PORT_RANGE[1]} "
-             "范围内自动挑第一个空闲端口（方便同机并发跑多个 auto_eval）",
+        "范围内自动挑第一个空闲端口（方便同机并发跑多个 auto_eval）",
     )
     p.add_argument("--package", nargs="+", metavar="PKG", help="传给 batch_run.py 的 --package")
     p.add_argument("--tasks", nargs="+", metavar="TASK", help="传给 batch_run.py 的任务列表")
@@ -605,7 +620,8 @@ def _print_overall_summary(
 
     for base_key, summaries in trial_data.items():
         print_trial_summary(
-            base_key, summaries,
+            base_key,
+            summaries,
             result_root=os.path.join(RESULT_BASE, date_str),
             date_str=date_str,
         )
@@ -648,7 +664,9 @@ def main() -> None:
     for i, model_cfg in enumerate(models, 1):
         log.info(
             "[%d/%d] 模型: %s (inference_trials=%d)",
-            i, len(models), model_cfg["key"],
+            i,
+            len(models),
+            model_cfg["key"],
             model_cfg.get("inference_trials", model_cfg.get("trial", 1)),
         )
         _run_one_model(model_cfg, gpus, args.port, batch_extra, date_str, results, trial_data)

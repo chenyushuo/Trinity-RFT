@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 # Image-input detection across session formats
 # ---------------------------------------------------------------------------
 
+
 def _content_part_is_image_block(part: Any) -> bool:
     """user 消息 content 中单条是否表示图片（与多模态 API 多种块结构兼容）。"""
     if not isinstance(part, dict):
@@ -60,7 +61,13 @@ def _content_part_is_image_block(part: Any) -> bool:
     if src and src.get("type") in ("base64", "url", "file"):
         return True
     # 顶层 image 字段（非纯文本块）
-    if part.get("image") is not None and t not in ("text", "thinking", "tool_use", "tool_result", None):
+    if part.get("image") is not None and t not in (
+        "text",
+        "thinking",
+        "tool_use",
+        "tool_result",
+        None,
+    ):
         return True
     return False
 
@@ -118,7 +125,9 @@ def session_has_multimodal_image_signal(session: dict) -> bool:
 
     用于判断是否按多模态检索任务注入幻觉评测的 grounding 文案（不依赖像素输入 grader）。
     """
-    return _session_user_message_has_attached_image(session) or _session_used_view_image_tool(session)
+    return _session_user_message_has_attached_image(session) or _session_used_view_image_tool(
+        session
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +147,7 @@ def _extract_inline_thinking(session: dict, max_chars: int = 12000) -> str:
     full_response = extract_final_response(session)
     m = _THINK_TAG_RE.search(full_response)
     if m:
-        raw = full_response[:m.start()].strip()
+        raw = full_response[: m.start()].strip()
         if raw:
             return raw[:max_chars]
     return ""
@@ -164,9 +173,7 @@ def build_multimodal_search_hallucination_extra_context(
         if len(thinking) > max_thinking_chars:
             thinking = thinking[:max_thinking_chars] + "\n[... thinking 已截断 ...]"
         return (
-            _MM_SEARCH_HALLUCINATION_GROUNDING_ZH
-            + "\n\n[Agent 视觉相关 thinking / 内部推理]\n"
-            + thinking
+            _MM_SEARCH_HALLUCINATION_GROUNDING_ZH + "\n\n[Agent 视觉相关 thinking / 内部推理]\n" + thinking
         )
     return _MM_SEARCH_HALLUCINATION_GROUNDING_FALLBACK_ZH
 
@@ -175,7 +182,8 @@ def build_multimodal_search_hallucination_extra_context(
 # Screenshot coherence evaluation (multimodal: query + response + image)
 # ---------------------------------------------------------------------------
 
-def extract_screenshot_paths(session: dict) -> list[str]:
+
+def extract_screenshot_paths(session: dict) -> list[str]:  # noqa: C901
     """从 session 中提取 desktop_screenshot 工具产生的截图路径。"""
     paths: list[str] = []
     for turn in session.get("agent", {}).get("memory", {}).get("content", []):
@@ -223,10 +231,13 @@ def extract_screenshot_paths(session: dict) -> list[str]:
 def _image_to_base64(path: str) -> tuple[str, str] | None:
     """读取本地图片文件为 base64，返回 (b64_str, format)。"""
     import base64 as _b64
+
     if not os.path.isfile(path):
         return None
     ext = os.path.splitext(path)[1].lower().lstrip(".")
-    fmt = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "png")
+    fmt = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(
+        ext, "png"
+    )
     with open(path, "rb") as f:
         data = _b64.standard_b64encode(f.read()).decode("ascii")
     return data, fmt
@@ -264,8 +275,7 @@ async def _evaluate_screenshot_coherence_once(
         f"不要被 Agent 的自述所误导——即使 Agent 声称完成了任务，"
         f"如果截图内容与用户原始请求不符，也应给低分。",
         image,
-        f"（注意：以下是 Agent 的自述，仅供参考，请以截图实际内容为准）\n"
-        f"Agent 回复: {final_response}",
+        f"（注意：以下是 Agent 的自述，仅供参考，请以截图实际内容为准）\n" f"Agent 回复: {final_response}",
     ]
 
     grader = ImageCoherenceGrader(
@@ -282,7 +292,7 @@ async def _evaluate_screenshot_coherence_once(
         except Exception as e:
             logger.warning("screenshot_coherence attempt %d error: %s", attempt, e)
             last_result = GraderError(name="screenshot_coherence", error=str(e))
-            await asyncio.sleep(2 * (2 ** attempt))
+            await asyncio.sleep(2 * (2**attempt))
 
     return last_result  # type: ignore[return-value]
 

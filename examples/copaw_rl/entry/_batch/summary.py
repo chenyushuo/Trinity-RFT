@@ -77,7 +77,12 @@ def _model_aggregate(
         def _valid(d):
             return [v for t, v in d.get(m, {}).items() if statuses.get(t) != "ERROR" and v >= 0]
 
-        vs, vst, vl, vd = _valid(score_map), _valid(steps_map), _valid(length_map), _valid(duration_map)
+        vs, vst, vl, vd = (
+            _valid(score_map),
+            _valid(steps_map),
+            _valid(length_map),
+            _valid(duration_map),
+        )
         n_errors = sum(1 for s in statuses.values() if s == "ERROR")
         avg_len = avg_valid(vl)
         out[m] = {
@@ -127,9 +132,7 @@ def print_single_model_summary(
         icon = STATUS_ICONS.get(r["status"], "?")
         steps_str = str(r["steps"]) if r.get("steps", -1) >= 0 else "N/A"
         len_str = str(r["response_length"]) if r.get("response_length", -1) >= 0 else "N/A"
-        time_str = (
-            f"{r['duration_seconds']:.1f}s" if r.get("duration_seconds", -1) >= 0 else "N/A"
-        )
+        time_str = f"{r['duration_seconds']:.1f}s" if r.get("duration_seconds", -1) >= 0 else "N/A"
         retry_str = f" retry={r['retries']}" if r.get("retries", 0) > 0 else ""
         print(
             f"    [{icon}] {r['task']:<40s} score={r['score']:<6} "
@@ -292,9 +295,7 @@ def print_trial_summary(
     per_trial_avgs: list[float] = []
     for t_idx, summary in enumerate(trial_summaries, 1):
         results = summary.get("results", [])
-        valid = [
-            r["score"] for r in results if r.get("status") != "ERROR" and r["score"] >= 0
-        ]
+        valid = [r["score"] for r in results if r.get("status") != "ERROR" and r["score"] >= 0]
         avg = avg_valid(valid)
         per_trial_avgs.append(avg)
         print(f"  Trial {t_idx}: 平均分={_fmt(avg)} (有效任务={len(valid)})")

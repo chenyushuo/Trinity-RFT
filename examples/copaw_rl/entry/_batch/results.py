@@ -8,7 +8,7 @@ import os
 import shutil
 from collections import Counter
 
-from .constants import EVAL_API_FAILURE_PATTERNS, RETRYABLE_STATUSES, STATUS_LABELS
+from .constants import EVAL_API_FAILURE_PATTERNS, STATUS_LABELS
 
 
 def _task_dir(result_dir: str, model_label: str, task_id: str) -> str:
@@ -156,9 +156,7 @@ def reclassify_fail_results(
     return retryable
 
 
-def merge_retry_results(
-    original_results: list[dict], retry_results: list[dict]
-) -> list[dict]:
+def merge_retry_results(original_results: list[dict], retry_results: list[dict]) -> list[dict]:
     """用重试结果替换原始结果中对应 (model, task) 的条目。"""
     retry_map = {(r.get("model", ""), r["task"]): r for r in retry_results}
     return [retry_map.get((r.get("model", ""), r["task"]), r) for r in original_results]

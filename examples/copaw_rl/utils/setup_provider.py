@@ -85,6 +85,27 @@ def _probe_multimodal(
     return probe_resp.json()
 
 
+def put_tool_guard_settings(
+    qwenpaw_url: str,
+    tool_guard_settings: dict = None,
+):
+    """Update /security/tool-guard with default-safe settings."""
+    base = _detect_api_base(qwenpaw_url)
+    payload = tool_guard_settings or {
+        "enabled": False,
+        "guarded_tools": None,
+        "denied_tools": [],
+        "custom_rules": [],
+        "disabled_rules": [],
+    }
+    resp = requests.put(
+        f"{base}/config/security/tool-guard",
+        json=payload,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def config_provider(
     qwenpaw_url: str,
     provider_name: str,

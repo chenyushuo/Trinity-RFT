@@ -13,15 +13,27 @@ import os
 
 from .constants import MODELS, PROVIDER_BASE
 
-
 # OpenAI ChatCompletion 标准字段；其余字段（top_k / min_p / repetition_penalty
 # 等 vLLM 私有参数）会被收进 extra_body 透传给后端，OpenAI Python SDK 才不会
 # 因为未知顶层 kwargs 而报错。
-_OPENAI_STD_SAMPLING_FIELDS = frozenset({
-    "temperature", "top_p", "presence_penalty", "frequency_penalty",
-    "max_tokens", "max_completion_tokens", "n", "stop", "seed",
-    "logprobs", "top_logprobs", "logit_bias", "stream", "response_format",
-})
+_OPENAI_STD_SAMPLING_FIELDS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "max_tokens",
+        "max_completion_tokens",
+        "n",
+        "stop",
+        "seed",
+        "logprobs",
+        "top_logprobs",
+        "logit_bias",
+        "stream",
+        "response_format",
+    }
+)
 
 
 def sampling_params_to_generate_kwargs(sampling_params: dict) -> dict:
@@ -103,16 +115,10 @@ def build_provider_config(model_key: str) -> dict:
     """
     auto_base_url = os.environ.get("AUTO_EVAL_BASE_URL")
     auto_model_id = os.environ.get("AUTO_EVAL_MODEL_ID")
-    if (
-        auto_base_url
-        and auto_model_id
-        and model_key == os.environ.get("AUTO_EVAL_MODEL_KEY")
-    ):
+    if auto_base_url and auto_model_id and model_key == os.environ.get("AUTO_EVAL_MODEL_KEY"):
         cfg = copy.deepcopy(PROVIDER_BASE)
         provider_id = f"auto-{model_key}"
-        custom = _build_custom_provider(
-            provider_id, auto_model_id, model_key, auto_base_url, ""
-        )
+        custom = _build_custom_provider(provider_id, auto_model_id, model_key, auto_base_url, "")
         generate_kwargs_str = os.environ.get("AUTO_EVAL_GENERATE_KWARGS")
         if generate_kwargs_str:
             try:

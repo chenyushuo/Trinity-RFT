@@ -27,7 +27,7 @@ spec = importlib.util.spec_from_file_location(
     "sandbox_utils",
     os.path.join(os.path.dirname(__file__), "..", "workflows", "sandbox_utils.py"),
 )
-sandbox_utils = importlib.util.module_from_spec(spec)
+sandbox_utils = importlib.util.module_from_spec(spec)  # type: ignore
 spec.loader.exec_module(sandbox_utils)
 get_or_create_sandbox = sandbox_utils.get_or_create_sandbox
 run_teacher_workflow = sandbox_utils.run_teacher_workflow

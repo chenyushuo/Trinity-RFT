@@ -72,9 +72,11 @@ def get_vl_model() -> OpenAIChatModel:
 # Session helpers
 # ---------------------------------------------------------------------------
 
+
 def read_session(path: str | None = None) -> dict | None:
     """读取 session JSON 文件，带重试以应对文件未完全写入的情况。"""
     import time as _time
+
     path = path or os.environ.get("SESSION_FILE", "")
     if not path or not os.path.isfile(path):
         return None
@@ -218,16 +220,16 @@ def build_trajectory_messages(session: dict) -> list[dict] | None:
                 if item.get("type") == "text":
                     text_parts.append(item.get("text", ""))
                 elif item.get("type") == "tool_use":
-                    tool_calls.append({
-                        "type": "function",
-                        "id": item.get("id", ""),
-                        "function": {
-                            "name": item.get("name", ""),
-                            "arguments": json.dumps(
-                                item.get("input", {}), ensure_ascii=False
-                            ),
-                        },
-                    })
+                    tool_calls.append(
+                        {
+                            "type": "function",
+                            "id": item.get("id", ""),
+                            "function": {
+                                "name": item.get("name", ""),
+                                "arguments": json.dumps(item.get("input", {}), ensure_ascii=False),
+                            },
+                        }
+                    )
                 elif item.get("type") == "thinking":
                     txt = item.get("thinking") or item.get("text") or ""
                     if txt:
@@ -279,7 +281,12 @@ async def _trial_llm_grader(
             results.append(result)
         else:
             last_error = result
-            logger.warning("Trial %d/%d returned GraderError: %s", i + 1, trials, getattr(result, "error", result))
+            logger.warning(
+                "Trial %d/%d returned GraderError: %s",
+                i + 1,
+                trials,
+                getattr(result, "error", result),
+            )
 
     if not results:
         return last_error  # type: ignore[return-value]
@@ -292,7 +299,9 @@ async def _trial_llm_grader(
         selected = min(results, key=lambda r: abs(r.score - median_score))
         logger.info(
             "LLM grader trials: scores=%s, median=%.2f, selected=%.2f",
-            scores, median_score, selected.score,
+            scores,
+            median_score,
+            selected.score,
         )
 
     trial_scores = [r.score for r in results]
@@ -307,7 +316,9 @@ async def _trial_llm_grader(
                 "High variance in LLM grader '%s': trial_scores=%s, range=%.2f >= %.2f. "
                 "评分极不稳定，建议人工复核此样本。",
                 getattr(selected, "name", "?"),
-                trial_scores, score_range, _HIGH_VARIANCE_RANGE_THRESHOLD,
+                trial_scores,
+                score_range,
+                _HIGH_VARIANCE_RANGE_THRESHOLD,
             )
 
     metadata = selected.metadata if isinstance(selected.metadata, dict) else {}
@@ -322,7 +333,10 @@ async def _trial_llm_grader(
 # Grader execution engine — 所有 _evaluate_X_once 共用的 retry + language 工具
 # ---------------------------------------------------------------------------
 
-def _coerce_language(language: LanguageEnum | str, default: LanguageEnum = LanguageEnum.ZH) -> LanguageEnum:
+
+def _coerce_language(
+    language: LanguageEnum | str, default: LanguageEnum = LanguageEnum.ZH
+) -> LanguageEnum:
     """将 str 类型的 language 转为 LanguageEnum，无效值回退到 default。"""
     if isinstance(language, LanguageEnum):
         return language
@@ -350,18 +364,25 @@ async def _run_grader_once(
         try:
             result = await grader.aevaluate(**eval_kwargs)
         except Exception as exc:
-            backoff = min(30 * (3 ** attempt), 300)
+            backoff = min(30 * (3**attempt), 300)
             if attempt < max_retries:
                 logger.warning(
                     "%s grading attempt %d/%d raised %s: %s, retrying in %ds...",
-                    label, attempt + 1, max_retries + 1,
-                    type(exc).__name__, exc, backoff,
+                    label,
+                    attempt + 1,
+                    max_retries + 1,
+                    type(exc).__name__,
+                    exc,
+                    backoff,
                 )
                 await asyncio.sleep(backoff)
                 continue
             logger.error(
                 "%s grading failed after %d attempts, last exception: %s: %s",
-                label, max_retries + 1, type(exc).__name__, exc,
+                label,
+                max_retries + 1,
+                type(exc).__name__,
+                exc,
             )
             return GraderError(
                 name=label,
@@ -372,17 +393,21 @@ async def _run_grader_once(
             if attempt > 0:
                 logger.info(
                     "%s grading succeeded on attempt %d/%d",
-                    label, attempt + 1, max_retries + 1,
+                    label,
+                    attempt + 1,
+                    max_retries + 1,
                 )
             return result
         last_result = result
         if attempt < max_retries:
             logger.warning(
                 "%s grading attempt %d/%d returned GraderError: %s, retrying...",
-                label, attempt + 1, max_retries + 1,
+                label,
+                attempt + 1,
+                max_retries + 1,
                 getattr(result, "error", result),
             )
-            await asyncio.sleep(5 * (3 ** attempt))
+            await asyncio.sleep(5 * (3**attempt))
 
     return last_result  # type: ignore[return-value]
 
@@ -391,9 +416,11 @@ async def _run_grader_once(
 # Raw LLM call + JSON parsing (used by MapReduce hallucination)
 # ---------------------------------------------------------------------------
 
+
 async def _llm_raw_call(prompt: str, *, max_retries: int = 2, label: str = "") -> str:
     """异步调用评测 LLM，返回纯文本。用于 MapReduce 的 Extract/Map/Reduce 阶段。"""
     from openai import AsyncOpenAI
+
     client = AsyncOpenAI(
         api_key=os.environ.get("DASHSCOPE_API_KEY", ""),
         base_url=os.environ.get(
@@ -405,7 +432,8 @@ async def _llm_raw_call(prompt: str, *, max_retries: int = 2, label: str = "") -
     for attempt in range(max_retries + 1):
         try:
             resp = await client.chat.completions.create(
-                model=model, temperature=0,
+                model=model,
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = resp.choices[0].message.content or ""
@@ -413,13 +441,15 @@ async def _llm_raw_call(prompt: str, *, max_retries: int = 2, label: str = "") -
             return text
         except Exception as exc:
             if attempt < max_retries:
-                backoff = min(10 * (3 ** attempt), 120)
-                logger.warning("%s attempt %d failed: %s, retry in %ds",
-                               label, attempt + 1, exc, backoff)
+                backoff = min(10 * (3**attempt), 120)
+                logger.warning(
+                    "%s attempt %d failed: %s, retry in %ds", label, attempt + 1, exc, backoff
+                )
                 await asyncio.sleep(backoff)
             else:
                 logger.error("%s failed after %d attempts: %s", label, max_retries + 1, exc)
                 raise
+    return "Error: Failed to get response after retries"  # Fallback, should not reach here
 
 
 def _parse_json_array(text: str) -> list[dict]:
@@ -450,6 +480,7 @@ def _parse_json_object(text: str) -> dict:
 # ---------------------------------------------------------------------------
 # Assertion helpers (for use in test_outputs.py)
 # ---------------------------------------------------------------------------
+
 
 def log_grader_score_line(
     result: GraderScore | GraderError | Any,
@@ -508,15 +539,11 @@ def assert_grader_score(
 
     if isinstance(result, GraderError):
         log_grader_score_line(result, label=label)
-        raise AssertionError(
-            f"{label}失败 (GraderError): {result.error}"
-        )
+        raise AssertionError(f"{label}失败 (GraderError): {result.error}")
 
     log_grader_score_line(result, label=label)
 
-    assert result.score >= min_score, (
-        f"{label}未通过: score={result.score}, reason={result.reason}"
-    )
+    assert result.score >= min_score, f"{label}未通过: score={result.score}, reason={result.reason}"
 
 
 def assert_check(

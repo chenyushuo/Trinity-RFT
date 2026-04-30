@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 # Correctness core
 # ---------------------------------------------------------------------------
 
+
 async def _evaluate_correctness_core_once(
     session: dict,
     query: str,
@@ -132,9 +133,7 @@ async def _evaluate_hallucination_core_once(
     """
     language = _coerce_language(language)
     tool_ctx = (
-        precomputed_tool_context
-        if precomputed_tool_context is not None
-        else _get_context(session)
+        precomputed_tool_context if precomputed_tool_context is not None else _get_context(session)
     )
     parts: list[str] = [extract_agent_capability_context(session)]
     if context_extra.strip():
@@ -144,17 +143,23 @@ async def _evaluate_hallucination_core_once(
     context = "\n\n".join(parts)
 
     grader = HallucinationGrader(
-        model=get_llm_model(), threshold=threshold,
-        template=_COPAW_HALLUCINATION_TEMPLATE, language=language,
+        model=get_llm_model(),
+        threshold=threshold,
+        template=_COPAW_HALLUCINATION_TEMPLATE,
+        language=language,
     )
     eval_kwargs: dict[str, Any] = dict(
-        response=extract_final_response(session), query=query, context=context,
+        response=extract_final_response(session),
+        query=query,
+        context=context,
     )
     if reference_response.strip():
         eval_kwargs["reference_response"] = reference_response
 
     return await _run_grader_once(
-        grader, eval_kwargs, max_retries=max_retries,
+        grader,
+        eval_kwargs,
+        max_retries=max_retries,
         label="Hallucination",
     )
 
@@ -185,11 +190,15 @@ async def _evaluate_hallucination_core(
     if total_chars > _MAPREDUCE_CONTEXT_THRESHOLD:
         logger.info(
             "Hallucination context %d chars > threshold %d, using MapReduce",
-            total_chars, _MAPREDUCE_CONTEXT_THRESHOLD,
+            total_chars,
+            _MAPREDUCE_CONTEXT_THRESHOLD,
         )
         return await _evaluate_hallucination_mapreduce(
-            session, query, entries,
-            max_retries=max_retries, threshold=threshold,
+            session,
+            query,
+            entries,
+            max_retries=max_retries,
+            threshold=threshold,
             trials=trials,
         )
 
@@ -212,8 +221,12 @@ async def _evaluate_hallucination_core(
 # MapReduce hallucination (long-context fallback)
 # ---------------------------------------------------------------------------
 
+
 async def _mr_extract_claims(
-    response: str, query: str, *, max_retries: int = 2,
+    response: str,
+    query: str,
+    *,
+    max_retries: int = 2,
 ) -> list[dict]:
     prompt = _MR_EXTRACT_CLAIMS_PROMPT.format(query=query, response=response[:12000])
     text = await _llm_raw_call(prompt, max_retries=max_retries, label="MR-Extract")
@@ -226,7 +239,8 @@ async def _mr_extract_claims(
 
 
 def _mr_keyword_search(
-    claims: list[dict], entries: list[tuple[str, str]],
+    claims: list[dict],
+    entries: list[tuple[str, str]],
 ) -> dict[int, list[str]]:
     """对每条 claim 的 keywords 做字符串匹配，返回 {claim_id: [命中摘要]}。"""
     results: dict[int, list[str]] = {}
@@ -241,7 +255,7 @@ def _mr_keyword_search(
                 if pos < 0:
                     pos = content.lower().find(kw.lower())
                 if pos >= 0:
-                    snippet = content[max(0, pos - 80): pos + len(kw) + 120]
+                    snippet = content[max(0, pos - 80) : pos + len(kw) + 120]
                     hits.append(f"[Entry {ei}] ...{snippet.strip()}...")
                     break
         if hits:
@@ -250,7 +264,8 @@ def _mr_keyword_search(
 
 
 def _mr_chunk_entries(
-    entries: list[tuple[str, str]], target_size: int = _MAPREDUCE_CHUNK_TARGET,
+    entries: list[tuple[str, str]],
+    target_size: int = _MAPREDUCE_CHUNK_TARGET,
 ) -> list[str]:
     """将 entries 按 target_size 装箱，不拆断单个 entry。"""
     if not entries:
@@ -272,21 +287,25 @@ def _mr_chunk_entries(
 
 
 async def _mr_verify_chunk(
-    claims: list[dict], chunk: str,
-    chunk_idx: int, total_chunks: int,
-    *, max_retries: int = 2,
+    claims: list[dict],
+    chunk: str,
+    chunk_idx: int,
+    total_chunks: int,
+    *,
+    max_retries: int = 2,
 ) -> list[dict]:
     claims_for_prompt = [
-        {"id": c["id"], "claim": c["claim"], "keywords": c.get("keywords", [])}
-        for c in claims
+        {"id": c["id"], "claim": c["claim"], "keywords": c.get("keywords", [])} for c in claims
     ]
     prompt = _MR_VERIFY_CHUNK_PROMPT.format(
-        chunk_idx=chunk_idx, total_chunks=total_chunks,
+        chunk_idx=chunk_idx,
+        total_chunks=total_chunks,
         chunk=chunk,
         claims_json=json.dumps(claims_for_prompt, ensure_ascii=False, indent=2),
     )
     text = await _llm_raw_call(
-        prompt, max_retries=max_retries,
+        prompt,
+        max_retries=max_retries,
         label=f"MR-Verify[{chunk_idx}/{total_chunks}]",
     )
     results = _parse_json_array(text)
@@ -296,7 +315,10 @@ async def _mr_verify_chunk(
 
 
 async def _mr_verify_all_chunks(
-    claims: list[dict], chunks: list[str], *, max_retries: int = 2,
+    claims: list[dict],
+    chunks: list[str],
+    *,
+    max_retries: int = 2,
 ) -> list[list[dict]]:
     tasks = [
         _mr_verify_chunk(claims, ch, i + 1, len(chunks), max_retries=max_retries)
@@ -320,9 +342,9 @@ def _mr_merge_verdicts(
                 if r.get("id") != cid:
                     continue
                 if r.get("supported"):
-                    supported_by.append(f"chunk {ci+1}: {r.get('evidence','')[:200]}")
+                    supported_by.append(f"chunk {ci + 1}: {r.get('evidence', '')[:200]}")
                 if r.get("contradicted"):
-                    contradicted_by.append(f"chunk {ci+1}")
+                    contradicted_by.append(f"chunk {ci + 1}")
         kw = keyword_hits.get(cid, [])
         if supported_by or kw:
             verdict = "supported"
@@ -330,18 +352,26 @@ def _mr_merge_verdicts(
             verdict = "contradicted"
         else:
             verdict = "unverified"
-        merged.append({
-            "id": cid, "claim": claim["claim"],
-            "supported_by": supported_by, "contradicted_by": contradicted_by,
-            "keyword_hits": kw, "verdict": verdict,
-        })
+        merged.append(
+            {
+                "id": cid,
+                "claim": claim["claim"],
+                "supported_by": supported_by,
+                "contradicted_by": contradicted_by,
+                "keyword_hits": kw,
+                "verdict": verdict,
+            }
+        )
     return merged
 
 
 async def _mr_reduce_once(
-    claims: list[dict], merged: list[dict],
-    query: str, response: str,
-    *, max_retries: int = 2,
+    claims: list[dict],
+    merged: list[dict],
+    query: str,
+    response: str,
+    *,
+    max_retries: int = 2,
 ) -> GraderScore | GraderError:
     verdict_lines: list[str] = []
     for v in merged:
@@ -362,7 +392,8 @@ async def _mr_reduce_once(
         verdict_lines.append("\n".join(lines))
 
     prompt = _MR_REDUCE_PROMPT.format(
-        query=query, response=response[:8000],
+        query=query,
+        response=response[:8000],
         verdicts_text="\n\n".join(verdict_lines),
     )
     try:
@@ -393,7 +424,8 @@ async def _evaluate_hallucination_mapreduce(
     claims = await _mr_extract_claims(response, query, max_retries=max_retries)
     if not claims:
         return GraderScore(
-            name="hallucination", score=5.0,
+            name="hallucination",
+            score=5.0,
             reason="[MapReduce] 未从回复中提取到可验证的事实性声明，视为无幻觉",
             metadata={"_strategy": "mapreduce", "_num_claims": 0},
         )
@@ -403,7 +435,9 @@ async def _evaluate_hallucination_mapreduce(
 
     chunks = _mr_chunk_entries(entries, target_size=_MAPREDUCE_CHUNK_TARGET)
     logger.info("MR: %d entries → %d chunks", len(entries), len(chunks))
-    chunk_results = await _mr_verify_all_chunks(claims, chunks, max_retries=max_retries) if chunks else []
+    chunk_results = (
+        await _mr_verify_all_chunks(claims, chunks, max_retries=max_retries) if chunks else []
+    )
 
     merged = _mr_merge_verdicts(claims, chunk_results, keyword_hits)
     verdict_counts = {
@@ -436,19 +470,22 @@ async def _evaluate_hallucination_mapreduce(
     trial_scores = [r.score for r in results]
     high_var = (
         (max(trial_scores) - min(trial_scores)) >= _HIGH_VARIANCE_RANGE_THRESHOLD
-        if len(trial_scores) >= 2 else False
+        if len(trial_scores) >= 2
+        else False
     )
     metadata = selected.metadata if isinstance(selected.metadata, dict) else {}
-    metadata.update({
-        "_trial_scores": trial_scores,
-        "_trial_errors": trials - len(results),
-        "_high_variance": high_var,
-        "_strategy": "mapreduce",
-        "_num_claims": len(claims),
-        "_num_chunks": len(chunks),
-        "_verdicts_summary": verdict_counts,
-        "threshold": threshold,
-    })
+    metadata.update(
+        {
+            "_trial_scores": trial_scores,
+            "_trial_errors": trials - len(results),
+            "_high_variance": high_var,
+            "_strategy": "mapreduce",
+            "_num_claims": len(claims),
+            "_num_chunks": len(chunks),
+            "_verdicts_summary": verdict_counts,
+            "threshold": threshold,
+        }
+    )
     selected.metadata = metadata
     return selected
 
@@ -456,6 +493,7 @@ async def _evaluate_hallucination_mapreduce(
 # ---------------------------------------------------------------------------
 # Search relevance
 # ---------------------------------------------------------------------------
+
 
 async def _evaluate_search_relevance_once(
     session: dict,
@@ -474,17 +512,21 @@ async def _evaluate_search_relevance_once(
     language = _coerce_language(language)
     grader = RelevanceGrader(model=get_llm_model(), threshold=threshold, language=language)
     eval_kwargs: dict[str, Any] = dict(
-        response=extract_final_response(session), query=query,
+        response=extract_final_response(session),
+        query=query,
         context=_get_context(session),
     )
     if reference_response.strip():
         eval_kwargs["reference_response"] = reference_response
-    return await _run_grader_once(grader, eval_kwargs, max_retries=max_retries, label="Search relevance")
+    return await _run_grader_once(
+        grader, eval_kwargs, max_retries=max_retries, label="Search relevance"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public wrappers
 # ---------------------------------------------------------------------------
+
 
 async def evaluate_correctness(
     session: dict,
@@ -501,9 +543,13 @@ async def evaluate_correctness(
     context = 全部工具输出。
     """
     return await _evaluate_correctness_core(
-        session, query, reference_response,
-        max_retries=max_retries, threshold=threshold,
-        language=language, trials=trials,
+        session,
+        query,
+        reference_response,
+        max_retries=max_retries,
+        threshold=threshold,
+        language=language,
+        trials=trials,
     )
 
 
@@ -524,14 +570,22 @@ async def evaluate_file_correctness(
     """
     if reference_response.strip():
         return await _evaluate_correctness_core(
-            session, query, reference_response,
-            max_retries=max_retries, threshold=threshold,
-            language=language, trials=trials,
+            session,
+            query,
+            reference_response,
+            max_retries=max_retries,
+            threshold=threshold,
+            language=language,
+            trials=trials,
         )
     return await _evaluate_hallucination_core(
-        session, query, reference_response,
-        max_retries=max_retries, threshold=threshold,
-        language=language, trials=trials,
+        session,
+        query,
+        reference_response,
+        max_retries=max_retries,
+        threshold=threshold,
+        language=language,
+        trials=trials,
     )
 
 
@@ -555,10 +609,14 @@ async def evaluate_search_hallucination(
     """
     extra = build_multimodal_search_hallucination_extra_context(session)
     return await _evaluate_hallucination_core(
-        session, query, reference_response,
+        session,
+        query,
+        reference_response,
         context_extra=extra,
-        max_retries=max_retries, threshold=threshold,
-        language=language, trials=trials,
+        max_retries=max_retries,
+        threshold=threshold,
+        language=language,
+        trials=trials,
     )
 
 

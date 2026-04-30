@@ -64,7 +64,9 @@ def _build_oss_config() -> dict:
     }
 
 
-def _should_use_dashscope(provider_config: dict | None, api_server_url: str | None) -> tuple[bool, str | None]:
+def _should_use_dashscope(
+    provider_config: dict | None, api_server_url: str | None
+) -> tuple[bool, str | None]:
     """判断是否走 teacher 评测路径（dashscope 直连，绕过 vLLM）。"""
     if not provider_config or api_server_url:
         return False, None

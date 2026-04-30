@@ -2,7 +2,6 @@ import argparse
 import hashlib
 import json
 import os
-import numpy as np
 import pickle
 import time
 import zipfile
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Tuple
 
 import httpx
+import numpy as np
 from e2b import CommandExitException, NotFoundException, Sandbox
 
 
@@ -104,7 +104,7 @@ def create_sandbox(token, domain, template, logger) -> Sandbox:
 
 
 def update_sandbox_files(sandbox: Sandbox, template, logger):
-    """递归同步 utils/ 下所有 .py 文件到 /root/，保留目录结构。
+    """递归同步 utils/ 下所有 .py 和 .sh 文件到 /root/，保留目录结构。
 
     - 顶层模块（如 bench_client.py）→ /root/bench_client.py
     - 包目录（如 copaw_eval/__init__.py）→ /root/copaw_eval/__init__.py
@@ -116,16 +116,18 @@ def update_sandbox_files(sandbox: Sandbox, template, logger):
         md5_maps = json.load(f)
 
     md5_map = md5_maps.get(template, {})
-    for py_file in utils_dir.rglob("*.py"):
-        rel_parts = py_file.relative_to(utils_dir).parts
+    for file in utils_dir.rglob("*"):
+        if not file.is_file() or file.suffix not in {".py", ".sh"}:
+            continue
+        rel_parts = file.relative_to(utils_dir).parts
         if any(p.startswith((".", "__pycache__")) for p in rel_parts):
             continue
-        rel_path = py_file.relative_to(utils_dir).as_posix()
-        with open(py_file, "rb") as f:
+        rel_path = file.relative_to(utils_dir).as_posix()
+        with open(file, "rb") as f:
             file_md5 = hashlib.file_digest(f, "md5").hexdigest()
         if md5_map.get(rel_path, "") != file_md5:
-            logger.info(f"Updating sandbox [{sandbox.sandbox_id}] with [{py_file}]...")
-            with open(py_file, "r") as f:
+            logger.info(f"Updating sandbox [{sandbox.sandbox_id}] with [{file}]...")
+            with open(file, "r") as f:
                 sandbox.files.write(f"/root/{rel_path}", f)
 
 
@@ -453,13 +455,17 @@ if __name__ == "__main__":
 
     try:
         result = sandbox.commands.run(
-            "pip uninstall copaw -y && "
-            "pip install qwenpaw==v1.1.4post2 && "
+            "pip uninstall qwenpaw -y && "
+            "pip install qwenpaw==v1.1.5 && "
             "pip install oss2 pytest py-openjudge pytest-asyncio && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/model_trajectory.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_openai_model.py < /root/patch/openai_model.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_model_response.py < /root/patch/model_response.patch && "
-            "python /root/fix_config.py && "
+            "apt-get update && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y x11vnc openbox && "
+            "git clone --depth 1 https://github.com/novnc/noVNC.git /opt/noVNC && "
+            "git clone --depth 1 --branch v0.12.0 https://github.com/novnc/websockify.git /opt/noVNC/utils/websockify && "
+            "ln -s /opt/noVNC/vnc.html /opt/noVNC/index.html && "
             "echo '100.118.58.9    copaw-dataset.oss-cn-beijing-internal.aliyuncs.com' >> /etc/hosts",
             timeout=3600,
             on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
@@ -479,4 +485,15 @@ if __name__ == "__main__":
     except CommandExitException as e:
         logger.info("Error starting qwenpaw app. stdout: %s", e.stdout.strip())
         logger.info("Error starting qwenpaw app. stderr: %s", e.stderr.strip())
+        raise e
+
+    try:
+        result = sandbox.commands.run(
+            "bash /root/start-vnc.sh &> /root/start-vnc.log",
+            background=True,
+        )
+        logger.info("VNC server started with pid %d", result.pid)
+    except CommandExitException as e:
+        logger.info("Error starting VNC server. stdout: %s", e.stdout.strip())
+        logger.info("Error starting VNC server. stderr: %s", e.stderr.strip())
         raise e

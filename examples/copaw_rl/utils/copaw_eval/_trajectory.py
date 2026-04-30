@@ -103,6 +103,7 @@ def _is_session_truncated(session: dict) -> bool:
 # Trajectory quality
 # ---------------------------------------------------------------------------
 
+
 async def _evaluate_trajectory_once(
     session: dict,
     *,
@@ -115,12 +116,17 @@ async def _evaluate_trajectory_once(
         return GraderError(name="trajectory_quality", error="无法从 session 提取 trajectory 数据")
 
     grader = LLMGrader(
-        name="trajectory_quality", mode=GraderMode.POINTWISE,
-        model=get_llm_model(), template=TRAJ_GRADER_TEMPLATE, language=LanguageEnum.ZH,
+        name="trajectory_quality",
+        mode=GraderMode.POINTWISE,
+        model=get_llm_model(),
+        template=TRAJ_GRADER_TEMPLATE,
+        language=LanguageEnum.ZH,
     )
     return await _run_grader_once(
-        grader, dict(messages=_format_trajectory_messages(messages)),
-        max_retries=max_retries, label="Trajectory",
+        grader,
+        dict(messages=_format_trajectory_messages(messages)),
+        max_retries=max_retries,
+        label="Trajectory",
     )
 
 
@@ -170,6 +176,7 @@ async def evaluate_trajectory(
 # Safety trajectory
 # ---------------------------------------------------------------------------
 
+
 async def _evaluate_safety_trajectory_once(
     session: dict,
     *,
@@ -188,12 +195,17 @@ async def _evaluate_safety_trajectory_once(
         else SAFETY_TRAJ_GRADER_TEMPLATE
     )
     grader = LLMGrader(
-        name="safety_trajectory_quality", mode=GraderMode.POINTWISE,
-        model=get_llm_model(), template=template, language=LanguageEnum.ZH,
+        name="safety_trajectory_quality",
+        mode=GraderMode.POINTWISE,
+        model=get_llm_model(),
+        template=template,
+        language=LanguageEnum.ZH,
     )
     return await _run_grader_once(
-        grader, dict(messages=_format_trajectory_messages(messages)),
-        max_retries=max_retries, label="Safety trajectory",
+        grader,
+        dict(messages=_format_trajectory_messages(messages)),
+        max_retries=max_retries,
+        label="Safety trajectory",
     )
 
 

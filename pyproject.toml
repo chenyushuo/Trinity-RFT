@@ -52,7 +52,7 @@ trinity = "trinity.cli.launcher:main"
 
 [project.optional-dependencies]
 vllm = [
-    "vllm>=0.17.0,<=0.19.1",
+    "vllm>=0.17.0,<=0.20.0",
     # For v0.17 to v0.19, the default dependencies require transformers < 5.
     # We have patched vLLM to support transformers >= 5.0.0.
 ]

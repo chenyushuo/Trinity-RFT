@@ -32,8 +32,6 @@ from .providers import (
     build_provider_config_from_json,
     sampling_params_to_generate_kwargs,
 )
-
-_log = logging.getLogger(__name__)
 from .results import (
     copy_non_retryable_results,
     load_error_tasks_from_dir,
@@ -49,6 +47,7 @@ from .summary import (
     save_batch_summary,
 )
 
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -64,57 +63,88 @@ def parse_cli() -> argparse.Namespace:
         help="位置参数：任务 ID（可与 --models 混用，建议优先用 --tasks 避免误解析）",
     )
     p.add_argument(
-        "-t", "--tasks", nargs="+", dest="tasks_opt", metavar="TASK",
+        "-t",
+        "--tasks",
+        nargs="+",
+        dest="tasks_opt",
+        metavar="TASK",
         help="要运行的任务 ID（与位置参数 tasks 二选一）",
     )
     p.add_argument(
-        "--range", nargs=2, type=int, metavar=("START", "END"),
+        "--range",
+        nargs=2,
+        type=int,
+        metavar=("START", "END"),
         help="按编号范围跑任务（如 --range 1 8）",
     )
     p.add_argument(
-        "-p", "--parallel", type=int, default=8, metavar="N",
+        "-p",
+        "--parallel",
+        type=int,
+        default=8,
+        metavar="N",
         help="最大并发数（默认 8，设为 1 即串行）",
     )
     p.add_argument("--serial", action="store_true", help="串行执行（等同 --parallel 1）")
 
     p.add_argument(
-        "-m", "--models", nargs="+", metavar="MODEL",
+        "-m",
+        "--models",
+        nargs="+",
+        metavar="MODEL",
         help="预设名 或 provider_id:model_name 自定义格式",
     )
     p.add_argument(
-        "--models-file", metavar="FILE",
+        "--models-file",
+        metavar="FILE",
         help='JSON 模型列表，格式 [{"key":"...","provider_id":"...","model":"..."}]',
     )
 
     p.add_argument(
-        "--package", nargs="+", metavar="PKG",
+        "--package",
+        nargs="+",
+        metavar="PKG",
         help=f"按分类 package 跑任务，可选: {', '.join(PACKAGE_CATEGORIES)}",
     )
 
     p.add_argument(
-        "--shuffle", action="store_true", default=True,
+        "--shuffle",
+        action="store_true",
+        default=True,
         help="随机打乱任务顺序（默认开启，避免固定顺序带来的偏差）",
     )
     p.add_argument(
-        "--no-shuffle", dest="shuffle", action="store_false",
+        "--no-shuffle",
+        dest="shuffle",
+        action="store_false",
         help="保持任务原始顺序",
     )
 
     p.add_argument(
-        "--retries", type=int, default=3, metavar="N",
+        "--retries",
+        type=int,
+        default=3,
+        metavar="N",
         help="基础设施瞬态错误的最大重试次数（默认 3）",
     )
     p.add_argument(
-        "--retry-from", metavar="RESULT_DIR",
+        "--retry-from",
+        metavar="RESULT_DIR",
         help="从指定结果目录重跑 ERROR 任务（读取 _batch_summary.json）",
     )
     p.add_argument(
-        "--retry-errors", type=int, default=3, metavar="N",
+        "--retry-errors",
+        type=int,
+        default=3,
+        metavar="N",
         help="跑完后自动重试 ERROR 任务的最大轮次（默认 3）",
     )
 
     p.add_argument(
-        "--trial", type=int, default=None, metavar="N",
+        "--trial",
+        type=int,
+        default=None,
+        metavar="N",
         help="每个模型重复推理 N 次（也可在 --models-file 里单独配置）",
     )
 
@@ -188,14 +218,16 @@ def _maybe_inject_sampling_env(items: list[dict]) -> None:
         _log.warning(
             "[sampling_params] 多个模型 sampling_params 不一致，将统一使用 %s 的配置；"
             "其余模型 (%s) 的 sampling_params 被忽略",
-            first_key, ", ".join(inconsistent),
+            first_key,
+            ", ".join(inconsistent),
         )
 
     gen_kwargs = sampling_params_to_generate_kwargs(first_sp)
     payload = json.dumps(gen_kwargs, ensure_ascii=False)
     os.environ["AUTO_EVAL_GENERATE_KWARGS"] = payload
-    _log.info("[sampling_params] 来自 --models-file [%s]，AUTO_EVAL_GENERATE_KWARGS=%s",
-              first_key, payload)
+    _log.info(
+        "[sampling_params] 来自 --models-file [%s]，AUTO_EVAL_GENERATE_KWARGS=%s", first_key, payload
+    )
 
 
 def _resolve_base_models(args) -> tuple[list[str], dict[str, dict], dict[str, int]]:
@@ -320,8 +352,13 @@ async def run_full_batch(args, models: ResolvedModels) -> None:
 
     if args.retry_errors > 0:
         all_results = await _auto_retry_loop(
-            all_results, batch_dir, run_ts, models, max_parallel,
-            max_rounds=args.retry_errors, infra_retries=args.retries,
+            all_results,
+            batch_dir,
+            run_ts,
+            models,
+            max_parallel,
+            max_rounds=args.retry_errors,
+            infra_retries=args.retries,
         )
         save_batch_summary(
             batch_dir, all_results, models.keys, task_ids, max_parallel, run_ts, models.multi_model
@@ -469,7 +506,8 @@ async def _auto_retry_loop(
             break
 
         new_results = await run_retry_tasks(
-            retry_jobs, run_ts,
+            retry_jobs,
+            run_ts,
             max_parallel=max_parallel,
             result_root=os.path.dirname(batch_dir),
             max_retries=infra_retries,
@@ -534,13 +572,13 @@ def _emit_trial_summary(
 ) -> None:
     for base_key, trial_keys in trial_groups.items():
         summaries = [
-            {"results": [r for r in all_results if r.get("model", "") == tk]}
-            for tk in trial_keys
+            {"results": [r for r in all_results if r.get("model", "") == tk]} for tk in trial_keys
         ]
         summaries = [s for s in summaries if s["results"]]
         if len(summaries) > 1:
             print_trial_summary(
-                base_key, summaries,
+                base_key,
+                summaries,
                 result_root=os.path.join("result", date_prefix),
                 date_str=date_prefix,
             )
@@ -569,7 +607,7 @@ async def run_retry_from_dir(args, models: ResolvedModels) -> None:
         print("没有需要重试的任务")
         return
 
-    run_ts = summary["timestamp"]
+    # run_ts = summary["timestamp"]
     orig_model_keys = summary.get("models", [])
     orig_multi_model = "model_stats" in summary or len(orig_model_keys) > 1
     all_task_ids = sorted({r["task"] for r in summary["results"]})
@@ -603,9 +641,14 @@ async def run_retry_from_dir(args, models: ResolvedModels) -> None:
     print(f"  已复制 {n_copied} 个不需要重试的任务结果")
 
     all_results = await _retry_until_stable(
-        all_results, retry_jobs, retry_ts, error_pairs,
-        max_parallel=max_parallel, result_root=result_root,
-        infra_retries=args.retries, max_rounds=max(args.retry_errors, 1),
+        all_results,
+        retry_jobs,
+        retry_ts,
+        error_pairs,
+        max_parallel=max_parallel,
+        result_root=result_root,
+        infra_retries=args.retries,
+        max_rounds=max(args.retry_errors, 1),
     )
 
     for mk in orig_model_keys if orig_multi_model else [""]:
@@ -615,20 +658,25 @@ async def run_retry_from_dir(args, models: ResolvedModels) -> None:
 
     print_category_stats(all_results)
     save_batch_summary(
-        retry_batch_dir, all_results, orig_model_keys, all_task_ids,
-        max_parallel, retry_ts, orig_multi_model,
+        retry_batch_dir,
+        all_results,
+        orig_model_keys,
+        all_task_ids,
+        max_parallel,
+        retry_ts,
+        orig_multi_model,
     )
 
     inferred = _infer_trial_groups(orig_model_keys)
     for base_key, trial_keys in inferred.items():
         summaries = [
-            {"results": [r for r in all_results if r.get("model", "") == tk]}
-            for tk in trial_keys
+            {"results": [r for r in all_results if r.get("model", "") == tk]} for tk in trial_keys
         ]
         summaries = [s for s in summaries if s["results"]]
         if len(summaries) > 1:
             print_trial_summary(
-                base_key, summaries,
+                base_key,
+                summaries,
                 result_root=result_root,
                 date_str=os.path.basename(result_root),
             )
@@ -694,7 +742,8 @@ async def _retry_until_stable(
             print(f"{'=' * 60}")
 
         new_results = await run_retry_tasks(
-            current, retry_ts,
+            current,
+            retry_ts,
             max_parallel=max_parallel,
             result_root=result_root,
             max_retries=infra_retries,
