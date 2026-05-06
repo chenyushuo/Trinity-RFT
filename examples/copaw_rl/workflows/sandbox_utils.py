@@ -464,7 +464,8 @@ if __name__ == "__main__":
             "apt-get update && "
             "apt-get install -y xfce4 xfce4-goodies x11vnc openbox xvfb novnc websockify supervisor dbus-x11 && "
             "rm -rf /var/lib/apt/lists/* && "
-            "echo '100.118.58.9    copaw-dataset.oss-cn-beijing-internal.aliyuncs.com' >> /etc/hosts",
+            "echo '100.118.58.9    copaw-dataset.oss-cn-beijing-internal.aliyuncs.com' >> /etc/hosts && "
+            "qwenpaw init --defaults --accept-security",
             timeout=3600,
             on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
             on_stderr=lambda data: logger.info(f"[stderr]: {data.rstrip()}"),

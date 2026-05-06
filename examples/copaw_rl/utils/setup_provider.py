@@ -35,14 +35,24 @@ def _safe_json(resp: requests.Response):
         return {"text": resp.text}
 
 
-def _add_model_if_needed(base: str, provider_id: str, model_id: str) -> None:
+def _multimodal_info(model_id: str) -> dict:
+    if "qwen3.5" in model_id.lower() or "qwen3.6" in model_id.lower():
+        return {"supports_multimodal": True, "supports_image": True, "supports_video": True}
+    return {}
+
+
+def _add_model_if_needed(base: str, provider_id: str, model_id: str) -> dict:
     """Best-effort model registration for provider before activation."""
+    json_data = {"id": model_id, "name": model_id}
+    mm_info = _multimodal_info(model_id)
+    json_data.update(mm_info)
     resp = requests.post(
         f"{base}/models/{provider_id}/models",
-        json={"id": model_id, "name": model_id},
+        json=json_data,
     )
     # 201: added; 400: maybe already exists; ignore here.
     _ = resp
+    return mm_info
 
 
 def _activate_model(
@@ -176,15 +186,16 @@ def config_provider(
 
     # 2. 激活模型
     # 当前版本会校验模型必须先存在于 provider 中，先补充注册
-    _add_model_if_needed(base, provider_id, provider_model_id)
+    mm_info = _add_model_if_needed(base, provider_id, provider_model_id)
     active = _activate_model(
         base=base,
         provider_id=provider_id,
         provider_model_id=provider_model_id,
         agent_id=agent_id,
     )
-    probe = _probe_multimodal(base, provider_id, provider_model_id)
-    return {"active": active, "probe": probe}
+    if not mm_info:
+        mm_info = _probe_multimodal(base, provider_id, provider_model_id)
+    return {"active": active, "mm_info": mm_info}
 
 
 def config_builtin_provider(
@@ -213,15 +224,16 @@ def config_builtin_provider(
     )
     config_resp.raise_for_status()
 
-    _add_model_if_needed(base, provider_id, provider_model_id)
+    mm_info = _add_model_if_needed(base, provider_id, provider_model_id)
     active = _activate_model(
         base=base,
         provider_id=provider_id,
         provider_model_id=provider_model_id,
         agent_id=agent_id,
     )
-    probe = _probe_multimodal(base, provider_id, provider_model_id)
-    return {"active": active, "probe": probe}
+    if not mm_info:
+        mm_info = _probe_multimodal(base, provider_id, provider_model_id)
+    return {"active": active, "mm_info": mm_info}
 
 
 if __name__ == "__main__":

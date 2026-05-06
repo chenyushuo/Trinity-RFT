@@ -95,7 +95,7 @@ PREFIX_DOMAIN: Dict[str, str] = {
     "pdf": "fileprocess",
     "xlsx": "fileprocess",
     "qa": "qa",
-    "chinese_qa": "qa",
+    "chinese_qa": "search",
     "bootstrap": "bootstrap",
     "cron": "cron",
     "memory": "memory",
