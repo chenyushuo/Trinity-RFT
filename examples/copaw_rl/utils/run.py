@@ -303,7 +303,7 @@ def _handle_rollout_hint(task_config: dict, auto_inject: bool = False) -> None:
     - 若 auto_inject=True 且文件存在，将内容写入 environment/config/SOUL.md。
     - 无论 auto_inject 是否开启，最终都删除 rollout_hint 标记的源文件。
     """
-    rollout_hint = task_config.get("rollout_hint")
+    rollout_hint = task_config.get("metadata", {}).get("rollout_hint")
     if not rollout_hint:
         return
 
