@@ -48,7 +48,7 @@
         "bench_client.py": "0fe43038e068f796f82015333d69c63d",
         "export_training_data.py": "4107e75a5506896a471a7655fc5412e2",
         "judge.py": "add227c82443d3c5402290f9b8e8d482",
-        "run.py": "99d41a6ac4e3d76bbbe7c13a784d7aca",
+        "run.py": "44c58272896014cb621b8c6be0b57b9f",
         "setup_provider.py": "f01c4d034f932778101f50236d0ea52a",
         "copaw_eval/__init__.py": "db2fc09adaa00e4b0518e8902caad64d",
         "copaw_eval/_context.py": "e8553785949d05a2416b892506d9f75f",
