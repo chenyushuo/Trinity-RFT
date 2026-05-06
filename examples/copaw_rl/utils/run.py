@@ -72,6 +72,12 @@ def parse_args():
         action="store_true",
         help="Evaluation mode: run grader and output summary.json",
     )
+    parser.add_argument(
+        "--auto-hint-inject",
+        action="store_true",
+        default=False,
+        help="Auto-inject rollout_hint file content into environment/config/SOUL.md",
+    )
     return parser.parse_args()
 
 
@@ -287,6 +293,37 @@ def _extract_text_from_content(content_blocks: list[dict]) -> str:
         for block in content_blocks
         if block.get("type") == "text" and block.get("text")
     )
+
+
+def _handle_rollout_hint(task_config: dict, auto_inject: bool = False) -> None:
+    """处理 task_config 中的 rollout_hint 字段。
+
+    - 如果 task_config 中没有 rollout_hint 字段，什么都不做。
+    - 如果有 rollout_hint，从 _SCRIPT_DIR/environment/ 下寻找对应文件。
+    - 若 auto_inject=True 且文件存在，将内容写入 environment/config/SOUL.md。
+    - 无论 auto_inject 是否开启，最终都删除 rollout_hint 标记的源文件。
+    """
+    rollout_hint = task_config.get("rollout_hint")
+    if not rollout_hint:
+        return
+
+    hint_path = os.path.join(_SCRIPT_DIR, "environment", rollout_hint)
+    if not os.path.isfile(hint_path):
+        log.error("rollout_hint 文件不存在: %s", hint_path)
+        sys.exit(1)
+
+    if auto_inject:
+        hint_content = read_file(hint_path)
+        soul_dir = os.path.join(_SCRIPT_DIR, "environment", "config")
+        os.makedirs(soul_dir, exist_ok=True)
+        soul_path = os.path.join(soul_dir, "SOUL.md")
+        with open(soul_path, "a", encoding="utf-8") as f:
+            f.write(hint_content)
+        log.info("已将 rollout_hint 注入到 %s", soul_path)
+
+    # 无论是否注入，都删除 rollout_hint 源文件
+    os.remove(hint_path)
+    log.info("已删除 rollout_hint 源文件: %s", hint_path)
 
 
 def deploy_environment(extract_dir: str) -> None:
@@ -1040,10 +1077,14 @@ def main():  # noqa: C901
         client = bench_client.BenchmarkClient(oss_prefix=args.oss_prefix)
         client.download_compressed_task(args.task_id, _SCRIPT_DIR)
 
+        # Step 1.5: 加载 task.yaml 并处理 rollout_hint
+        task_config = _load_task_yaml(_SCRIPT_DIR)
+        if task_config is not None:
+            _handle_rollout_hint(task_config, auto_inject=args.auto_hint_inject)
+
         # Step 2: 将 environment/ 文件部署到 $HOME
         log.info("部署 environment/ 到 $HOME ...")
         deploy_environment(_SCRIPT_DIR)
-        task_config = _load_task_yaml(_SCRIPT_DIR)
 
         # Step 2.5: 如果存在 setup.sh，在调用 Agent 之前执行
         # task.yaml schema:
