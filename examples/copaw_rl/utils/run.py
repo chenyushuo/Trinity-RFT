@@ -1046,7 +1046,29 @@ def main():  # noqa: C901
         task_config = _load_task_yaml(_SCRIPT_DIR)
 
         # Step 2.5: 如果存在 setup.sh，在调用 Agent 之前执行
-        for setup_script in task_config.get("setup", []):
+        # task.yaml schema:
+        #   setup:
+        #     required: [setup.sh, ...]
+        #     optional: [...]
+        # 历史上还存在 list 老格式（setup: [setup.sh]），但 benchmark_v3 已全量
+        # 收敛到 dict。这里仍然显式校验类型——不是为了兼容，而是避免再次出现
+        # `for x in dict` 迭代 keys 导致 setup.sh 静默跑空的退化（参见旧 bug）。
+        _setup_field = task_config.get("setup") or {}
+        if not isinstance(_setup_field, dict):
+            log.warning(
+                "task.yaml 'setup' 期望为 dict（{required: [...], optional: [...]}），"
+                "实际为 %s，已跳过 setup 阶段",
+                type(_setup_field).__name__,
+            )
+            _setup_field = {}
+        _setup_scripts: list = []
+        for _k in ("required", "optional"):
+            _v = _setup_field.get(_k) or []
+            if isinstance(_v, list):
+                _setup_scripts.extend(_v)
+            elif isinstance(_v, str):
+                _setup_scripts.append(_v)
+        for setup_script in _setup_scripts:
             setup_script = os.path.join(_SCRIPT_DIR, setup_script)
             if not os.path.isfile(setup_script):
                 log.warning("setup.sh 不存在: %s", setup_script)
