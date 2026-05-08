@@ -164,16 +164,16 @@ class ExperiencePipeline:
         # Process experiences through operators
         for idx, operator in enumerate(self.operators):
             with Timer(
-                metrics, f"time/experience_pipeline/operator/{idx}_{operator.__class__.__name__}"
+                metrics, f"experience_pipeline/time/operator/{idx}_{operator.__class__.__name__}"
             ):
                 exps, metric = await operator.process(exps)
                 metrics.update(metric)
         metrics["experience_count"] = len(exps)
 
         # Write processed experiences to output buffer
-        with Timer(metrics, "time/experience_pipeline/write"):
+        with Timer(metrics, "experience_pipeline/time/write"):
             await self.output.write_async(exps)
-        metrics["time/experience_pipeline/total"] = time.time() - st
+        metrics["experience_pipeline/time/total"] = time.time() - st
 
         # prefix metrics keys with 'pipeline/'
         result_metrics = {}

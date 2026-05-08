@@ -401,7 +401,7 @@ class TestLauncherMain(unittest.TestCase):
             process.terminate()
 
     @mock.patch("trinity.manager.log_manager.LogManager")
-    @mock.patch("trinity.cli.launcher.load_config")
+    @mock.patch("trinity.cli.log.load_config")
     def test_log_mode(self, mock_load_config, mock_log_manager):
         result = runner.invoke(launcher.app, ["log"])
         self.assertNotEqual(result.exit_code, 0)

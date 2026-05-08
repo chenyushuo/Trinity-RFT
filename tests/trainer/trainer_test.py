@@ -31,7 +31,8 @@ from tests.tools import (
     get_vision_language_model_path,
 )
 from trinity.buffer import get_buffer_reader
-from trinity.cli.launcher import bench, both, convert, explore, run, serve, train
+from trinity.cli.convert import convert_command
+from trinity.cli.launcher import bench, both, explore, run, serve, train
 from trinity.common.config import (
     AlgorithmConfig,
     BufferConfig,
@@ -149,7 +150,7 @@ class TestTrainerCountdown(BaseTrainerCase):
         self.assertGreater(len(hf_dir_step_4), 0)
         self.assertGreater(len(hf_dir_step_8), 0)
         # test checkpoint convert
-        convert(self.config.checkpoint_job_dir)
+        convert_command(self.config.checkpoint_job_dir)
         hf_dir_step_4 = os.listdir(os.path.join(checkpoint_step_4, "actor", "huggingface"))
         hf_dir_step_8 = os.listdir(os.path.join(checkpoint_step_8, "actor", "huggingface"))
         self.assertIn("model.safetensors", hf_dir_step_4)

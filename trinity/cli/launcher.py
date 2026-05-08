@@ -2,7 +2,9 @@
 import asyncio
 import os
 import sys
+import time
 import traceback
+from dataclasses import dataclass
 from pprint import pprint
 from typing import Optional
 
@@ -10,10 +12,13 @@ import ray
 import typer
 from typing_extensions import Annotated
 
+from trinity.cli.convert import convert_command
+from trinity.cli.log import log_command
+from trinity.cli.perf import perf_app
+from trinity.cli.studio import studio_command
+from trinity.cli.view import view_command
 from trinity.common.config import Config, load_config
 from trinity.common.constants import DEBUG_NAMESPACE, PLUGIN_DIRS_ENV_VAR
-from trinity.manager.checkpoint_converter import Converter
-from trinity.manager.state_manager import StateManager
 from trinity.utils.dlc_utils import is_running, setup_ray_cluster, stop_ray_cluster
 from trinity.utils.log import get_logger
 from trinity.utils.plugin_loader import load_plugins
@@ -27,71 +32,196 @@ app = typer.Typer(
 )
 
 
-def bench(config: Config) -> None:
+@dataclass(slots=True)
+class StageError:
+    type_name: str
+    message: str
+    traceback_text: str
+
+
+@dataclass(slots=True)
+class StageStatus:
+    stage: str
+    success: bool
+    startup_time_sec: Optional[float] = None
+    execution_time_sec: Optional[float] = None
+    total_time_sec: Optional[float] = None
+    error: Optional[StageError] = None
+
+
+def _build_stage_error(error: BaseException) -> StageError:
+    return StageError(
+        type_name=type(error).__name__,
+        message=str(error),
+        traceback_text=traceback.format_exc(),
+    )
+
+
+def bench(config: Config, *, timeout: Optional[float] = None) -> StageStatus:
     """Evaluate model."""
     from trinity.explorer.explorer import Explorer
 
     config.explorer.name = "benchmark"
     explorer = Explorer.get_actor(config)
+    startup_started_at = time.perf_counter()
+    startup_time_sec: Optional[float] = None
     try:
-        ray.get(explorer.prepare.remote())
-        ray.get(explorer.benchmark.remote())
+        ray.get(explorer.prepare.remote(), timeout=timeout)
+        startup_time_sec = time.perf_counter() - startup_started_at
+
+        run_started_at = time.perf_counter()
+        ray.get(explorer.benchmark.remote(), timeout=timeout)
+        execution_time_sec = time.perf_counter() - run_started_at
         logger.info("Benchmark finished.")
-    except Exception:
-        logger.error(f"Benchmark failed:\n{traceback.format_exc()}")
+        return StageStatus(
+            stage="bench",
+            success=True,
+            startup_time_sec=startup_time_sec,
+            execution_time_sec=execution_time_sec,
+            total_time_sec=time.perf_counter() - startup_started_at,
+        )
+    except Exception as exc:
+        error = _build_stage_error(exc)
+        logger.error(f"Benchmark failed:\n{error.traceback_text}")
+        return StageStatus(
+            stage="bench",
+            success=False,
+            startup_time_sec=startup_time_sec,
+            execution_time_sec=None,
+            total_time_sec=time.perf_counter() - startup_started_at,
+            error=error,
+        )
     finally:
-        ray.get(explorer.shutdown.remote())
+        ray.get(explorer.shutdown.remote(), timeout=timeout)
 
 
-def explore(config: Config) -> None:
+def explore(config: Config, *, timeout: Optional[float] = None) -> StageStatus:
     """Run explorer."""
     from trinity.explorer.explorer import Explorer
 
     explorer = Explorer.get_actor(config)
+    startup_started_at = time.perf_counter()
+    startup_time_sec: Optional[float] = None
+    run_started_at: Optional[float] = None
 
     try:
-        ray.get(explorer.prepare.remote())
-        ray.get(explorer.sync_weight.remote())
-        ray.get(explorer.explore.remote())
-    except Exception:
-        logger.error(f"Explorer failed:\n{traceback.format_exc()}")
+        ray.get(explorer.prepare.remote(), timeout=timeout)
+        startup_time_sec = time.perf_counter() - startup_started_at
+
+        run_started_at = time.perf_counter()
+        ray.get(explorer.sync_weight.remote(), timeout=timeout)
+        ray.get(explorer.explore.remote(), timeout=timeout)
+        execution_time_sec = time.perf_counter() - run_started_at
+        return StageStatus(
+            stage="explore",
+            success=True,
+            startup_time_sec=startup_time_sec,
+            execution_time_sec=execution_time_sec,
+            total_time_sec=time.perf_counter() - startup_started_at,
+        )
+    except Exception as exc:
+        error = _build_stage_error(exc)
+        logger.error(f"Explorer failed:\n{error.traceback_text}")
+        execution_time_sec = (
+            time.perf_counter() - run_started_at if run_started_at is not None else None
+        )
+        return StageStatus(
+            stage="explore",
+            success=False,
+            startup_time_sec=startup_time_sec,
+            execution_time_sec=execution_time_sec,
+            total_time_sec=time.perf_counter() - startup_started_at,
+            error=error,
+        )
     finally:
-        ray.get(explorer.shutdown.remote())
+        ray.get(explorer.shutdown.remote(), timeout=timeout)
 
 
-def train(config: Config) -> None:
+def train(config: Config, *, timeout: Optional[float] = None) -> StageStatus:
     """Run trainer."""
     from trinity.trainer.trainer import Trainer
 
     trainer = Trainer.get_actor(config)
+    startup_started_at = time.perf_counter()
+    startup_time_sec: Optional[float] = None
+    run_started_at: Optional[float] = None
 
     try:
-        ray.get(trainer.prepare.remote())
-        ray.get(trainer.sync_weight.remote())
-        ray.get(trainer.train.remote())
-    except Exception:
-        logger.error(f"Trainer failed:\n{traceback.format_exc()}")
+        ray.get(trainer.prepare.remote(), timeout=timeout)
+        startup_time_sec = time.perf_counter() - startup_started_at
+
+        run_started_at = time.perf_counter()
+        ray.get(trainer.sync_weight.remote(), timeout=timeout)
+        ray.get(trainer.train.remote(), timeout=timeout)
+        execution_time_sec = time.perf_counter() - run_started_at
+        return StageStatus(
+            stage="train",
+            success=True,
+            startup_time_sec=startup_time_sec,
+            execution_time_sec=execution_time_sec,
+            total_time_sec=time.perf_counter() - startup_started_at,
+        )
+    except Exception as exc:
+        error = _build_stage_error(exc)
+        logger.error(f"Trainer failed:\n{error.traceback_text}")
+        execution_time_sec = (
+            time.perf_counter() - run_started_at if run_started_at is not None else None
+        )
+        return StageStatus(
+            stage="train",
+            success=False,
+            startup_time_sec=startup_time_sec,
+            execution_time_sec=execution_time_sec,
+            total_time_sec=time.perf_counter() - startup_started_at,
+            error=error,
+        )
     finally:
-        ray.get(trainer.shutdown.remote())
+        ray.get(trainer.shutdown.remote(), timeout=timeout)
 
 
-def serve(config: Config) -> None:
+def serve(config: Config, *, timeout: Optional[float] = None) -> StageStatus:
     """Run explorer in server mode."""
     from trinity.explorer.explorer import Explorer
 
     explorer = Explorer.get_actor(config)
+    startup_started_at = time.perf_counter()
+    startup_time_sec: Optional[float] = None
+    run_started_at: Optional[float] = None
 
     try:
-        ray.get(explorer.prepare.remote())
-        ray.get(explorer.sync_weight.remote())
-        ray.get(explorer.serve.remote())
-    except Exception:
-        logger.error(f"Explorer failed:\n{traceback.format_exc()}")
+        ray.get(explorer.prepare.remote(), timeout=timeout)
+        startup_time_sec = time.perf_counter() - startup_started_at
+
+        run_started_at = time.perf_counter()
+        ray.get(explorer.sync_weight.remote(), timeout=timeout)
+        ray.get(explorer.serve.remote(), timeout=timeout)
+        execution_time_sec = time.perf_counter() - run_started_at
+        return StageStatus(
+            stage="serve",
+            success=True,
+            startup_time_sec=startup_time_sec,
+            execution_time_sec=execution_time_sec,
+            total_time_sec=time.perf_counter() - startup_started_at,
+        )
+    except Exception as exc:
+        error = _build_stage_error(exc)
+        logger.error(f"Explorer failed:\n{error.traceback_text}")
+        execution_time_sec = (
+            time.perf_counter() - run_started_at if run_started_at is not None else None
+        )
+        return StageStatus(
+            stage="serve",
+            success=False,
+            startup_time_sec=startup_time_sec,
+            execution_time_sec=execution_time_sec,
+            total_time_sec=time.perf_counter() - startup_started_at,
+            error=error,
+        )
     finally:
-        ray.get(explorer.shutdown.remote())
+        ray.get(explorer.shutdown.remote(), timeout=timeout)
 
 
-def both(config: Config) -> None:
+def both(config: Config) -> StageStatus:
     """Setup both explorer and trainer.
 
     For the explorer, a step contains `batch_size * sync_interval` number
@@ -106,6 +236,7 @@ def both(config: Config) -> None:
 
     explorer = Explorer.get_actor(config)
     trainer = Trainer.get_actor(config)
+    started_at = time.perf_counter()
     try:
         ray.get([explorer.__ray_ready__.remote(), trainer.__ray_ready__.remote()])
         ray.get(
@@ -147,8 +278,20 @@ def both(config: Config) -> None:
                 "==============================================================="
             )
             ray.wait(wait_ref, timeout=config.synchronizer.sync_timeout)
-    except Exception:
-        logger.error(f"Explorer or Trainer failed:\n{traceback.format_exc()}")
+        return StageStatus(
+            stage="both",
+            success=True,
+            total_time_sec=time.perf_counter() - started_at,
+        )
+    except Exception as exc:
+        error = _build_stage_error(exc)
+        logger.error(f"Explorer or Trainer failed:\n{error.traceback_text}")
+        return StageStatus(
+            stage="both",
+            success=False,
+            total_time_sec=time.perf_counter() - started_at,
+            error=error,
+        )
     finally:
         ray.wait(
             [explorer.shutdown.remote(), trainer.shutdown.remote()],
@@ -167,7 +310,7 @@ MODE_MAP = {
 }
 
 
-def run_stage(config: Config) -> None:
+def run_stage(config: Config) -> StageStatus:
     ray.init(
         address=config.cluster.ray_address,
         ignore_reinit_error=True,
@@ -179,7 +322,7 @@ def run_stage(config: Config) -> None:
         from trinity.buffer.pipelines.task_pipeline import check_and_run_task_pipeline
 
         check_and_run_task_pipeline(config)
-        MODE_MAP[config.mode](config)
+        return MODE_MAP[config.mode](config)  # type: ignore[operator]
     finally:
         if config.monitor.enable_ray_timeline:
             timeline_file = os.path.join(config.monitor.cache_dir, "timeline.json")
@@ -224,6 +367,7 @@ def run(
 
     try:
         if cfg.stages:
+            from trinity.manager.state_manager import StateManager
             from trinity.trainer.verl.utils import get_latest_hf_checkpoint_path
 
             state_manager = StateManager(
@@ -263,19 +407,6 @@ def run(
     finally:
         if dlc:
             stop_ray_cluster(namespace=cluster_namespace)
-
-
-@app.command()
-def studio(
-    port: Annotated[
-        int,
-        typer.Option("--port", "-p", help="The port for Trinity-Studio."),
-    ] = 8501,
-) -> None:
-    """Run studio to manage configurations."""
-    from trinity.manager.config_manager import ConfigManager
-
-    ConfigManager.run(port)
 
 
 @app.command()
@@ -357,145 +488,11 @@ def debug(
         )
 
 
-@app.command()
-def view(
-    url: Annotated[
-        str,
-        typer.Option(
-            "--url",
-            help="Database URL for the experience table, for example sqlite:////path/to/debug_buffer.db.",
-        ),
-    ],
-    table: Annotated[
-        str,
-        typer.Option("--table", help="Name of the experience table to monitor."),
-    ],
-    tokenizer: Annotated[
-        str,
-        typer.Option(
-            "--tokenizer",
-            help="Tokenizer/model path used to decode token ids in the viewer.",
-        ),
-    ],
-    schema: Annotated[
-        str,
-        typer.Option(
-            "--schema",
-            help="Schema type of the table. Supported values: experience, sft.",
-        ),
-    ] = "experience",
-    port: Annotated[
-        int,
-        typer.Option("--port", "-p", help="The port for Experience Viewer."),
-    ] = 8502,
-) -> None:
-    """Run the Streamlit viewer to inspect an experience table."""
-    from trinity.buffer.viewer import SQLExperienceViewer
-
-    schema = schema.lower()
-    if schema not in {"experience", "sft"}:
-        raise typer.BadParameter("--schema only supports 'experience' or 'sft'.")
-
-    SQLExperienceViewer.run_viewer(
-        model_path=tokenizer,
-        db_url=url,
-        table_name=table,
-        schema_type=schema,
-        port=port,
-    )
-
-
-@app.command()
-def convert(
-    checkpoint_dir: Annotated[
-        str,
-        typer.Option("--checkpoint-dir", "-c", help="The path to the checkpoint directory."),
-    ],
-    base_model_dir: Annotated[
-        Optional[str],
-        typer.Option("--base-model-dir", "-b", help="The path to the base model."),
-    ] = None,
-) -> None:
-    """Convert checkpoints to huggingface format."""
-    dir_path = checkpoint_dir
-    if "global_step_" in dir_path:
-        while not os.path.basename(dir_path).startswith("global_step_"):
-            dir_path = os.path.dirname(dir_path)
-    converter = Converter(base_model_dir)
-    converter.convert(dir_path)
-
-
-@app.command()
-def log(
-    log_dir: Annotated[
-        str,
-        typer.Option(
-            "--log-dir",
-            "-d",
-            help="Path to the log directory. If provided, it will be used directly and ignore --config.",
-        ),
-    ] = "",
-    config: Annotated[
-        str,
-        typer.Option(
-            "--config",
-            "-c",
-            help="Path to the config file. If provided, it will automatically locate the log directory based on the config.",
-        ),
-    ] = "",
-    keyword: Annotated[
-        Optional[str],
-        typer.Option(
-            "--keyword",
-            "-k",
-            help="Only track log files containing the keyword in their filenames.",
-        ),
-    ] = None,
-    level: Annotated[
-        str,
-        typer.Option("--level", "-l", help="The minimum log level to display in real-time."),
-    ] = "INFO",
-    last_n_lines: Annotated[
-        int,
-        typer.Option("--last-n-lines", "-n", help="Number of last lines to display when starting."),
-    ] = 0,
-    search_pattern: Annotated[
-        Optional[str],
-        typer.Option(
-            "--search-pattern",
-            "-p",
-            help="The pattern to search in log files. Only search for history logs and display all lines containing the pattern.",
-        ),
-    ] = None,
-    no_color: Annotated[
-        bool,
-        typer.Option("--no-color", help="Disable colored output."),
-    ] = False,
-) -> None:
-    """Monitor log files in real-time."""
-    from trinity.manager.log_manager import LogManager
-
-    if not config and not log_dir:
-        raise typer.BadParameter("Either --config or --log-dir must be provided.")
-    if not log_dir:
-        cfg = load_config(config)
-        checkpoint_job_dir = cfg.get_checkpoint_job_dir()
-        # we do not use check_and_update here because user may use this command
-        # in another environment
-        log_dir = os.path.join(checkpoint_job_dir, "log")
-
-    if not os.path.exists(log_dir):
-        raise FileNotFoundError(f"Log directory not found: {log_dir}")
-
-    log_manager = LogManager(
-        log_dir=log_dir,
-        keyword=keyword,
-        min_level=level,
-        color_output=not no_color,
-        last_n_lines=last_n_lines,
-        search_pattern=search_pattern,
-    )
-    log_manager.monitor()
+app.command("studio")(studio_command)
+app.add_typer(perf_app, name="perf")
+app.command("view")(view_command)
+app.command("convert")(convert_command)
+app.command("log")(log_command)
 
 
 def main() -> None:

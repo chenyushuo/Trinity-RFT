@@ -42,7 +42,9 @@ dependencies = [
     "sortedcontainers",
     "word2number",
     "matplotlib",
-    "transformers>=5.5.3",
+    "psutil",
+    "nvidia-ml-py",
+    "transformers>=5.6.2",
     "datasets>=4.0.0",
     "typer>=0.20.1",
 ]
@@ -52,9 +54,7 @@ trinity = "trinity.cli.launcher:main"
 
 [project.optional-dependencies]
 vllm = [
-    "vllm>=0.17.0,<=0.20.0",
-    # For v0.17 to v0.19, the default dependencies require transformers < 5.
-    # We have patched vLLM to support transformers >= 5.0.0.
+    "vllm>=0.19.1,<=0.20.1",
 ]
 data = [
     "py-data-juicer>=1.4.3"
@@ -79,9 +79,8 @@ dev = [
 ]
 megatron = [
     "megatron-core[mlm]==0.16.1",
-    # if you found "undefined symbol" error in transformer engine
-    # reinstall it with --no-build-isolation and `--no-cache-dir` flag
-    "transformer_engine[pytorch]==2.13.0",
+    # Please install transformer-engine from source, do not install from pip
+    # "transformer-engine[pytorch]==2.14.1",
 
     # Install mbridge from main branch (unreleased version)
     # "mbridge @ git+https://github.com/ISEEKYAN/mbridge.git@90c4633a6cdcfe5d29723d7b145d32f6f5e73303",
@@ -89,7 +88,7 @@ megatron = [
     # "megatron-bridge==0.3.1",
 ]
 tinker = [
-    "tinker>=0.10.0; python_version >= '3.11'",
+    "tinker>=0.10.0,<=0.16.1; python_version >= '3.11'",
 ]
 
 doc = [
@@ -104,7 +103,6 @@ doc = [
 
 mm = [
     "qwen-vl-utils",
-    "transformers>=4.54.0",
     "blobfile",
 ]
 
