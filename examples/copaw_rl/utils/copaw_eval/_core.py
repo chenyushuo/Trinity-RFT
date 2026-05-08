@@ -29,7 +29,9 @@ from openjudge.models.schema.prompt_template import LanguageEnum
 logger = logging.getLogger(__name__)
 
 
-def safe_grader_eval(label: str) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+def safe_grader_eval(
+    label: str,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
     """Public 评估函数（``evaluate_*``）的兜底装饰器。
 
     意图：保证 **任何** 公开评估函数即使内部抛出未捕获异常，也不会让异常穿透

@@ -483,9 +483,7 @@ def apply_taskset(name: str) -> None:
     global TASKSET_NAME
     name_l = (name or "").strip().lower()
     if name_l not in TASKSETS:
-        raise ValueError(
-            f"unknown taskset {name!r}; available: {sorted(TASKSETS)}"
-        )
+        raise ValueError(f"unknown taskset {name!r}; available: {sorted(TASKSETS)}")
 
     src = TASKSETS[name_l]
 
@@ -499,9 +497,7 @@ def apply_taskset(name: str) -> None:
     ALL_TASKS.extend(sorted({t for tasks in PACKAGE_TASKS.values() for t in tasks}))
 
     TASK_TO_CATEGORY.clear()
-    TASK_TO_CATEGORY.update(
-        {task: cat for cat, tasks in PACKAGE_TASKS.items() for task in tasks}
-    )
+    TASK_TO_CATEGORY.update({task: cat for cat, tasks in PACKAGE_TASKS.items() for task in tasks})
 
     TASKSET_NAME = name_l
 

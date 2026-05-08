@@ -456,7 +456,7 @@ if __name__ == "__main__":
     try:
         result = sandbox.commands.run(
             "pip uninstall qwenpaw -y && "
-            "pip install qwenpaw==v1.1.5 && "
+            "pip install qwenpaw==v1.1.5post2 && "
             "pip install oss2 pytest py-openjudge pytest-asyncio && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/model_trajectory.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_openai_model.py < /root/patch/openai_model.patch && "

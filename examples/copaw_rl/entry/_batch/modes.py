@@ -118,8 +118,7 @@ def parse_cli() -> argparse.Namespace:
         choices=sorted(TASKSETS.keys()),
         default=None,
         help=(
-            "选择任务集预设；不传则用环境变量 BENCH_TASKSET，默认 legacy。"
-            f"可选: {', '.join(sorted(TASKSETS.keys()))}"
+            "选择任务集预设；不传则用环境变量 BENCH_TASKSET，默认 legacy。" f"可选: {', '.join(sorted(TASKSETS.keys()))}"
         ),
     )
 

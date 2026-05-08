@@ -1366,8 +1366,7 @@ def main():  # noqa: C901
             eval_result["score"] = 0.0
             eval_result["hard_terminated"] = True
             eval_result["hard_terminated_reason"] = (
-                "最后一步发起了工具调用但 tool_results 为空且 content 为空，"
-                "且整条会话无任何最终文本回复"
+                "最后一步发起了工具调用但 tool_results 为空且 content 为空，" "且整条会话无任何最终文本回复"
             )
 
         _save_summary(

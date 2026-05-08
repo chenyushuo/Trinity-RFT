@@ -55,7 +55,7 @@ def _extract_image_url(item: dict) -> str:
     return url or "<image>"
 
 
-def _format_trajectory_messages(messages: list[dict]) -> str:
+def _format_trajectory_messages(messages: list[dict]) -> str:  # noqa: C901
     """将 OpenAI 格式的消息列表格式化为可读字符串，供 LLM grader prompt 使用。
 
     渲染逻辑：

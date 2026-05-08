@@ -323,9 +323,7 @@ def _clean_tool_output(call: dict) -> str:
     return result
 
 
-def _split_long_content(
-    content: str, max_chars: int = _MAX_ENTRY_CHARS
-) -> list[str]:
+def _split_long_content(content: str, max_chars: int = _MAX_ENTRY_CHARS) -> list[str]:
     """把一条可读超长文本按 ``max_chars`` 连续切片，保留所有中间正文。
 
     若长度未超阈值则原样返回单元素列表。每段长度 ≤ ``max_chars``，相邻段之间

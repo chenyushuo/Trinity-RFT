@@ -73,5 +73,20 @@
         "copaw_eval/_prompts.py": "0dc393ffd4bdd9e5c3006d59d0a16254",
         "copaw_eval/_trajectory.py": "6952e9eb985754893fbe8c2d29519ba0",
         "start-vnc.sh": "0627561a45e4cdf80e62297d607977b6"
+    },
+    "agentscope-qwenpaw-0508": {
+        "bench_client.py": "0fe43038e068f796f82015333d69c63d",
+        "export_training_data.py": "4107e75a5506896a471a7655fc5412e2",
+        "judge.py": "add227c82443d3c5402290f9b8e8d482",
+        "run.py": "d3abc600c9f9c11fbb0203bc7bf8f79a",
+        "setup_provider.py": "f2dfedd4e3bd92a597e36d3b43396e45",
+        "copaw_eval/__init__.py": "191c637b9fc7a755f630143a94d72c62",
+        "copaw_eval/_context.py": "aa8619303aa8046fa0ad959a44505659",
+        "copaw_eval/_core.py": "1102b0bf8a3f8b2ff0fc380af8e8d3ce",
+        "copaw_eval/_grading.py": "fc715264e4ea6e2f7b110101a4e6d45c",
+        "copaw_eval/_multimodal.py": "9249bfc5c7c6deeac4c96a4587d20117",
+        "copaw_eval/_prompts.py": "fcd01780372a67f6ce91811106a0a5ce",
+        "copaw_eval/_trajectory.py": "f0471a70d31bb06b0acb801f53948bc9",
+        "start-vnc.sh": "0627561a45e4cdf80e62297d607977b6"
     }
 }
