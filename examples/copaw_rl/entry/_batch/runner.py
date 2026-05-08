@@ -106,6 +106,20 @@ async def run_single_task(
         api_server_url = os.environ.get("AUTO_EVAL_BASE_URL")
         model_path = os.environ.get("AUTO_EVAL_MODEL_ID")
 
+        # 当 env vars 缺失（典型场景：--models-file 里给的是自部署服务的
+        # base_url / model_id，而非走 auto_eval 注入 env 的路径）时，从
+        # provider_config.custom_providers 里把 base_url/model_id 反向取出来，
+        # 否则 sandbox 里 run.py 收到的就是字面 "None"，整个评测跑不起来。
+        if not api_server_url and provider_config:
+            active = provider_config.get("active_llm", {})
+            pid = active.get("provider_id", "")
+            mid = active.get("model", "")
+            custom = provider_config.get("custom_providers", {}).get(pid, {})
+            if custom.get("base_url"):
+                api_server_url = custom["base_url"]
+            if not model_path and mid:
+                model_path = mid
+
         use_dashscope, dashscope_model_id = _should_use_dashscope(provider_config, api_server_url)
 
         try:

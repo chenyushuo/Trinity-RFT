@@ -14,18 +14,53 @@ tree).
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import re
 import statistics
-from typing import Any, Callable, Coroutine
+from typing import Any, Awaitable, Callable, Coroutine
 
 from openjudge.graders.schema import GraderError, GraderScore
 from openjudge.models.openai_chat_model import OpenAIChatModel
 from openjudge.models.schema.prompt_template import LanguageEnum
 
 logger = logging.getLogger(__name__)
+
+
+def safe_grader_eval(label: str) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+    """Public 评估函数（``evaluate_*``）的兜底装饰器。
+
+    意图：保证 **任何** 公开评估函数即使内部抛出未捕获异常，也不会让异常穿透
+    到 pytest 测试函数。否则一旦穿透，``assert_grader_score(GraderError)`` 这条
+    grader 行就不会被打印，下游 run.py 解析得到的 ``grader_results`` 会比
+    ``tests.total`` 少一条。
+
+    实现：捕获顶层异常，包装为 ``GraderError`` 返回，让调用方继续走
+    ``assert_grader_score`` → ``log_grader_score_line`` → 输出
+    ``[label] GRADER_ERROR: ...`` 行的常规路径。
+    """
+
+    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        @functools.wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await func(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — 这里就是要 catch-all
+                logger.exception(
+                    "%s 评估抛出未被内部兜底的异常 %s，包装为 GraderError 返回",
+                    label,
+                    type(exc).__name__,
+                )
+                return GraderError(
+                    name=label,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+        return wrapper
+
+    return decorator
 
 
 # ---------------------------------------------------------------------------

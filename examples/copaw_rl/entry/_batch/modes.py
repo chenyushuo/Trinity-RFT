@@ -18,6 +18,7 @@ import re
 from collections import Counter
 from datetime import datetime
 
+from . import constants
 from .constants import (
     ALL_TASKS,
     DEFAULT_MODEL,
@@ -26,6 +27,8 @@ from .constants import (
     PACKAGE_TASKS,
     RETRYABLE_STATUSES,
     STATUS_LABELS,
+    TASKSETS,
+    apply_taskset,
 )
 from .providers import (
     build_provider_config,
@@ -104,7 +107,20 @@ def parse_cli() -> argparse.Namespace:
         "--package",
         nargs="+",
         metavar="PKG",
-        help=f"按分类 package 跑任务，可选: {', '.join(PACKAGE_CATEGORIES)}",
+        help=(
+            f"按分类 package 跑任务，可选（当前 taskset={constants.TASKSET_NAME}）: "
+            f"{', '.join(PACKAGE_CATEGORIES)}"
+        ),
+    )
+
+    p.add_argument(
+        "--taskset",
+        choices=sorted(TASKSETS.keys()),
+        default=None,
+        help=(
+            "选择任务集预设；不传则用环境变量 BENCH_TASKSET，默认 legacy。"
+            f"可选: {', '.join(sorted(TASKSETS.keys()))}"
+        ),
     )
 
     p.add_argument(
@@ -150,7 +166,19 @@ def parse_cli() -> argparse.Namespace:
 
     p.add_argument("--list-packages", action="store_true", help="列出所有可用 package 并退出")
     p.add_argument("--list-models", action="store_true", help="列出所有预设模型并退出")
-    return p.parse_args()
+
+    args = p.parse_args()
+
+    if args.taskset:
+        apply_taskset(args.taskset)
+
+    print(
+        f"[batch_run] taskset={constants.TASKSET_NAME}  "
+        f"({len(PACKAGE_CATEGORIES)} categories, {len(ALL_TASKS)} tasks)  "
+        f"[切换方式: --taskset / BENCH_TASKSET env]"
+    )
+
+    return args
 
 
 def list_packages_and_exit() -> None:

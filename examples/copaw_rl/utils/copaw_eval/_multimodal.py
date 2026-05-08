@@ -33,6 +33,7 @@ from ._core import (
     extract_final_response,
     extract_tool_calls,
     get_vl_model,
+    safe_grader_eval,
 )
 from ._prompts import (
     _MM_SEARCH_HALLUCINATION_GROUNDING_FALLBACK_ZH,
@@ -72,16 +73,40 @@ def _content_part_is_image_block(part: Any) -> bool:
     return False
 
 
+# 文本里出现的"图片附件"标记，覆盖 task.yaml 把图片路径嵌在 text 块里的形态
+# （如 honey_03130_en 的 "Attachment:/app/.../57222__0.jpg" 写法，或部分 mat_*
+# 用 "/local_files/.../xxx.jpg" 作纯文本附件提示，agent 不一定会主动调 view_image）。
+_IMAGE_PATH_IN_TEXT_RE = re.compile(
+    r"(?:/local_files/[^\s\"'<>]+\.(?:png|jpe?g|webp|gif|bmp))"
+    r"|Attachment\s*[:：]\s*/?\S+\.(?:png|jpe?g|webp|gif|bmp)"
+    r"|attached\s+image",
+    re.IGNORECASE,
+)
+
+
+def _text_has_image_attachment_marker(text: str) -> bool:
+    """检查文本中是否含图片附件路径或 ``Attachment:`` / ``attached image`` 标记。"""
+    if not text:
+        return False
+    return bool(_IMAGE_PATH_IN_TEXT_RE.search(text))
+
+
 def _user_message_has_image(msg: dict) -> bool:
     if msg.get("role") != "user":
         return False
     content = msg.get("content")
     if isinstance(content, list):
-        return any(_content_part_is_image_block(p) for p in content)
+        # 优先看显式 image 块（情况 A：task.yaml 用 type=image 块声明）
+        if any(_content_part_is_image_block(p) for p in content):
+            return True
+        # Fallback：text 块中嵌有图片附件路径（情况 B：task.yaml 把路径写在 text 里）
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                if _text_has_image_attachment_marker(part.get("text", "")):
+                    return True
+        return False
     if isinstance(content, str):
-        # 极少数把路径写在纯文本里
-        s = content
-        return "image.jpg" in s or "/local_files/" in s or "attached image" in s.lower()
+        return _text_has_image_attachment_marker(content)
     return False
 
 
@@ -297,6 +322,7 @@ async def _evaluate_screenshot_coherence_once(
     return last_result  # type: ignore[return-value]
 
 
+@safe_grader_eval("screenshot_coherence")
 async def evaluate_screenshot_coherence(
     session: dict,
     query: str,

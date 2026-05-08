@@ -316,13 +316,13 @@ def run_eval_workflow(
         response_length = total_chars
     if duration_seconds < 0:
         duration_seconds = latency_seconds
-    tag = f"[{model_path}] {task_id}" if model_path else task_id
+    tag = f"[{model_label or model_path}] {task_id}" if (model_label or model_path) else task_id
     print(
         f"[{status}] {tag} — score: {score}, steps: {steps}, 输出(计费): {response_length}, time: {duration_seconds:.1f}s"
     )
     return {
         "task": task_id,
-        "model": model_path,
+        "model": model_label or model_path,
         "score": score,
         "status": status,
         "steps": steps,
@@ -416,13 +416,13 @@ def run_teacher_eval_workflow(
         response_length = total_chars
     if duration_seconds < 0:
         duration_seconds = latency_seconds
-    tag = f"[{model_id}] {task_id}" if model_id else task_id
+    tag = f"[{model_label or model_id}] {task_id}" if (model_label or model_id) else task_id
     print(
         f"[{status}] {tag} — score: {score}, steps: {steps}, 输出(计费): {response_length}, time: {duration_seconds:.1f}s"
     )
     return {
         "task": task_id,
-        "model": model_id,
+        "model": model_label or model_id,
         "score": score,
         "status": status,
         "steps": steps,

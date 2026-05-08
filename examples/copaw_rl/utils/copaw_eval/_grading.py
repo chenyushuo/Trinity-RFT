@@ -35,6 +35,7 @@ from ._core import (
     _trial_llm_grader,
     extract_final_response,
     get_llm_model,
+    safe_grader_eval,
 )
 from ._multimodal import build_multimodal_search_hallucination_extra_context
 from ._prompts import (
@@ -228,9 +229,22 @@ async def _mr_extract_claims(
     *,
     max_retries: int = 2,
 ) -> list[dict]:
+    """提取声明。
+
+    LLM 调用或 JSON 解析失败时退化为空列表，让上游走"未提取到声明，从宽给 5 分"
+    的 fallback 路径，而不是把异常抛到 pytest 测试函数让那条 grader 缺失。
+    """
     prompt = _MR_EXTRACT_CLAIMS_PROMPT.format(query=query, response=response[:12000])
-    text = await _llm_raw_call(prompt, max_retries=max_retries, label="MR-Extract")
-    claims = _parse_json_array(text)
+    try:
+        text = await _llm_raw_call(prompt, max_retries=max_retries, label="MR-Extract")
+        claims = _parse_json_array(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "MR-Extract failed (%s), falling back to empty claims list: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return []
     for i, c in enumerate(claims):
         c.setdefault("id", i)
         c.setdefault("keywords", [])
@@ -267,7 +281,14 @@ def _mr_chunk_entries(
     entries: list[tuple[str, str]],
     target_size: int = _MAPREDUCE_CHUNK_TARGET,
 ) -> list[str]:
-    """将 entries 按 target_size 装箱，不拆断单个 entry。"""
+    """将 entries 按 target_size 装箱。
+
+    通常 entries 已经在 ``build_unified_entries`` 阶段被 ``_truncate_entry_content``
+    截到 ``_MAX_ENTRY_CHARS`` 以内。这里再做一层防御：若某个单条 entry 仍然超过
+    ``target_size``（例如未来阈值不一致或上游被绕过），就把它切成多个 sub-chunk，
+    保证**没有任何 chunk 会超过 target_size**——避免 MR-Verify prompt 拼出来直接
+    撞模型 input length 上限触发 400。
+    """
     if not entries:
         return []
     chunks: list[str] = []
@@ -275,6 +296,20 @@ def _mr_chunk_entries(
     current_size = 0
     for header, content in entries:
         entry_text = f"{header}\n{content}"
+        if len(entry_text) > target_size:
+            if current_parts:
+                chunks.append("\n---\n".join(current_parts))
+                current_parts = []
+                current_size = 0
+            num_parts = (len(entry_text) + target_size - 1) // target_size
+            for i in range(num_parts):
+                start = i * target_size
+                segment = entry_text[start : start + target_size]
+                if i == 0:
+                    chunks.append(segment)
+                else:
+                    chunks.append(f"{header} [续 {i + 1}/{num_parts}]\n{segment}")
+            continue
         if current_size + len(entry_text) > target_size and current_parts:
             chunks.append("\n---\n".join(current_parts))
             current_parts = []
@@ -294,6 +329,10 @@ async def _mr_verify_chunk(
     *,
     max_retries: int = 2,
 ) -> list[dict]:
+    """验证单个 chunk 中的 claim。
+
+    LLM/JSON 解析失败时退化为空列表，让其他 chunk 仍可以贡献证据。
+    """
     claims_for_prompt = [
         {"id": c["id"], "claim": c["claim"], "keywords": c.get("keywords", [])} for c in claims
     ]
@@ -303,12 +342,22 @@ async def _mr_verify_chunk(
         chunk=chunk,
         claims_json=json.dumps(claims_for_prompt, ensure_ascii=False, indent=2),
     )
-    text = await _llm_raw_call(
-        prompt,
-        max_retries=max_retries,
-        label=f"MR-Verify[{chunk_idx}/{total_chunks}]",
-    )
-    results = _parse_json_array(text)
+    try:
+        text = await _llm_raw_call(
+            prompt,
+            max_retries=max_retries,
+            label=f"MR-Verify[{chunk_idx}/{total_chunks}]",
+        )
+        results = _parse_json_array(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "MR-Verify chunk %d/%d failed (%s), treating as no verdicts: %s",
+            chunk_idx,
+            total_chunks,
+            type(exc).__name__,
+            exc,
+        )
+        return []
     found_ids = [r["id"] for r in results if r.get("supported")]
     logger.info("MR-Verify chunk %d/%d: supported=%s", chunk_idx, total_chunks, found_ids)
     return results
@@ -320,11 +369,30 @@ async def _mr_verify_all_chunks(
     *,
     max_retries: int = 2,
 ) -> list[list[dict]]:
+    """并发验证所有 chunk。
+
+    使用 ``return_exceptions=True``：单个 chunk 即便绕过了内部 try/except 仍冒泡
+    出异常，也只让该 chunk 退化为空 verdict，不会拖垮整批。
+    """
     tasks = [
         _mr_verify_chunk(claims, ch, i + 1, len(chunks), max_retries=max_retries)
         for i, ch in enumerate(chunks)
     ]
-    return await asyncio.gather(*tasks)
+    raw = await asyncio.gather(*tasks, return_exceptions=True)
+    out: list[list[dict]] = []
+    for i, r in enumerate(raw):
+        if isinstance(r, BaseException):
+            logger.warning(
+                "MR-Verify chunk %d/%d raised through inner guard (%s), skipping: %s",
+                i + 1,
+                len(chunks),
+                type(r).__name__,
+                r,
+            )
+            out.append([])
+        else:
+            out.append(r)
+    return out
 
 
 def _mr_merge_verdicts(
@@ -528,6 +596,7 @@ async def _evaluate_search_relevance_once(
 # ---------------------------------------------------------------------------
 
 
+@safe_grader_eval("correctness")
 async def evaluate_correctness(
     session: dict,
     query: str,
@@ -553,6 +622,7 @@ async def evaluate_correctness(
     )
 
 
+@safe_grader_eval("file_correctness")
 async def evaluate_file_correctness(
     session: dict,
     query: str,
@@ -589,6 +659,7 @@ async def evaluate_file_correctness(
     )
 
 
+@safe_grader_eval("search_hallucination")
 async def evaluate_search_hallucination(
     session: dict,
     query: str,
@@ -620,6 +691,7 @@ async def evaluate_search_hallucination(
     )
 
 
+@safe_grader_eval("search_relevance")
 async def evaluate_search_relevance(
     session: dict,
     query: str,

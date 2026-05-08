@@ -130,6 +130,13 @@ def config_provider(
     base = _detect_api_base(qwenpaw_url)
     provider_id = provider_name
 
+    # 与 _add_model_if_needed 一致：创建时带上多模态元数据，避免模型已在 create 里注册导致后续 POST 重复而无法更新
+    initial_model: dict = {
+        "id": provider_model_id,
+        "name": provider_model_name or provider_model_id,
+    }
+    initial_model.update(_multimodal_info(provider_model_id))
+
     # 1. 创建自定义 provider
     create_resp = requests.post(
         f"{base}/models/custom-providers",
@@ -139,12 +146,7 @@ def config_provider(
             "default_base_url": provider_base_url,
             "api_key_prefix": "",
             "chat_model": provider_chat_model,
-            "models": [
-                {
-                    "id": provider_model_id,
-                    "name": provider_model_name or provider_model_id,
-                }
-            ],
+            "models": [initial_model],
         },
     )
 

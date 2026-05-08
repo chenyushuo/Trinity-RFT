@@ -265,12 +265,42 @@ def _clean_curl_output(output: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# 单条 tool 输出最大字符数。超出后做截断（文本）或整体替换占位（疑似二进制）。
+# 对齐下游 MapReduce 单 chunk 目标（_MAPREDUCE_CHUNK_TARGET=30_000），
+# 防止单个 entry 直接撑爆模型 input limit（曾出现 read_file 读 PNG → MR-Verify
+# 单 chunk 拼超 98w 字符触发 400 BadRequestError）。
+_MAX_ENTRY_CHARS = 30_000
+
+# 二进制启发式判定：采样前 N 字符里若出现 NUL 或不可打印控制字符占比超阈值，
+# 就视为二进制（PNG/PDF/zip 等），整段替换为占位说明，下游 grader 没必要逐字读。
+_BINARY_SAMPLE_BYTES = 4096
+_BINARY_NONPRINTABLE_RATIO = 0.20
+
+
+def _is_likely_binary(text: str) -> bool:
+    if not text:
+        return False
+    sample = text[:_BINARY_SAMPLE_BYTES]
+    if "\x00" in sample:
+        return True
+    nonprintable = sum(1 for ch in sample if ord(ch) < 32 and ch not in "\n\r\t")
+    return nonprintable / len(sample) > _BINARY_NONPRINTABLE_RATIO
+
+
+def _binary_placeholder(content: str) -> str:
+    """二进制 tool 输出的占位说明（grader 没法读字节流，留着只会浪费 token / 撞限）。"""
+    return f"[二进制内容已省略，原大小约 {len(content)} 字符]"
+
+
 def _clean_tool_output(call: dict) -> str:
     """根据工具类型派发到对应 cleaner，返回清洗后的文本（空字符串=本调用应跳过）。
 
     - browser_use: 跳过 open/click 等 action 调用；snapshot 走 _clean_browser_output
     - execute_shell_command: 仅当是 curl/wget 类网页抓取时清洗 HTML；其他保持原样
     - 其他工具: 原样输出
+    超长 + 疑似二进制时整段替换为占位说明；超长可读文本不在此截断，留给
+    ``build_unified_entries`` 按 ``_MAX_ENTRY_CHARS`` 切成多条连续 entry，避免
+    丢失中间正文。
     """
     name = call.get("name", "")
     output = call.get("output", "") or ""
@@ -281,19 +311,40 @@ def _clean_tool_output(call: dict) -> str:
         if _is_browser_action_skip(call):
             return ""
         cleaned = _clean_browser_output(output)
-        return cleaned if cleaned else output
-
-    if name == "execute_shell_command" and _is_search_shell_call(call):
+        result = cleaned if cleaned else output
+    elif name == "execute_shell_command" and _is_search_shell_call(call):
         cleaned = _clean_curl_output(output)
-        return cleaned if cleaned else output
+        result = cleaned if cleaned else output
+    else:
+        result = output
 
-    return output
+    if len(result) > _MAX_ENTRY_CHARS and _is_likely_binary(result):
+        return _binary_placeholder(result)
+    return result
+
+
+def _split_long_content(
+    content: str, max_chars: int = _MAX_ENTRY_CHARS
+) -> list[str]:
+    """把一条可读超长文本按 ``max_chars`` 连续切片，保留所有中间正文。
+
+    若长度未超阈值则原样返回单元素列表。每段长度 ≤ ``max_chars``，相邻段之间
+    没有重叠，按原始顺序排列。
+    """
+    if len(content) <= max_chars:
+        return [content]
+    return [content[i : i + max_chars] for i in range(0, len(content), max_chars)]
 
 
 def build_unified_entries(session: dict) -> list[tuple[str, str]]:
     """收集 session 中所有工具调用的输出，按统一规则清洗 + 去重。
 
     返回 [(header, content), ...] 的有序列表（按调用时间）。
+
+    单条工具输出超过 ``_MAX_ENTRY_CHARS`` 时按 ``_split_long_content`` 切成多条
+    连续片段，每片 header 追加 ``[k/N]`` 标识（同一来源、保持原顺序），从而把
+    中间正文也保留下来——避免「头+尾」截断时中段事实被丢弃。
+
     后续可由：
       - `_pack_entries_reverse_fill` 拼成单次 grader 用的 context；
       - `_evaluate_hallucination_mapreduce` 直接消费做 chunking。
@@ -308,14 +359,20 @@ def build_unified_entries(session: dict) -> list[tuple[str, str]]:
         cleaned = _clean_tool_output(c)
         if not cleaned:
             continue
-        # 跨工具内容去重：同一页面被反复抓取或重复 shell 输出只保留一次
+        # 跨工具内容去重在切片之前做（fingerprint 取整段内容，切片不会绕过去重）。
         fp = _content_fingerprint(cleaned)
         if fp and any(fp == prev for prev in seen_fingerprints):
             continue
         if fp:
             seen_fingerprints.append(fp)
-        header = f"[Tool {i}] {c.get('name', '')}: {(c.get('input', '') or '')[:2000]}"
-        entries.append((header, cleaned))
+        base_header = f"[Tool {i}] {c.get('name', '')}: {(c.get('input', '') or '')[:2000]}"
+        segments = _split_long_content(cleaned)
+        if len(segments) == 1:
+            entries.append((base_header, segments[0]))
+        else:
+            num_parts = len(segments)
+            for k, seg in enumerate(segments, 1):
+                entries.append((f"{base_header} [{k}/{num_parts}]", seg))
     return entries
 
 

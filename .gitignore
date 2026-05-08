@@ -99,3 +99,7 @@ wandb/
 
 # checkpoints
 checkpoints/
+
+# eval results
+result/
+results/

@@ -651,6 +651,33 @@ def extract_final_text(session_data: dict) -> str:
     return ""
 
 
+def _is_hard_terminated_trajectory(trajectory: list, final_text: str) -> bool:
+    """检测「半路死掉」的轨迹：
+
+    命中条件（同时满足）：
+      - ``final_text`` 为空（agent 没有任何最终文本回复）
+      - ``trajectory`` 非空
+      - 最后一步 ``tool_calls`` 非空、``tool_results`` 为空、``content`` 为空
+        （即：发起了工具调用但工具未返回 / 模型未续推理就被截断）
+
+    命中即整条 task 直接判 0 分（status=failed），不再经 grader 聚合。
+    典型场景：达到 max_steps 截断、agent 在 tool_use 后超时未续、
+    工具调用后因 token/网络异常 session 断流。
+    """
+    if final_text.strip():
+        return False
+    if not trajectory:
+        return False
+    last = trajectory[-1] or {}
+    if not last.get("tool_calls"):
+        return False
+    if last.get("tool_results"):
+        return False
+    if (last.get("content") or "").strip():
+        return False
+    return True
+
+
 def _strip_ansi_codes(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
@@ -720,6 +747,8 @@ def _parse_grader_results(stdout: str) -> list[dict]:
             )
 
     # GRADER_ERROR（v1/v2 格式相同）
+    # type=grader_error 让下游消费方一眼看出"该测试用例确实跑了，但 grader 内部
+    # 异常未拿到分数"，从而能与 grader_count.errored 对齐。
     for m in re.finditer(
         r"^\[(.+?)\]\s+GRADER_ERROR:\s+(.*?)(?:\n|$)",
         stdout,
@@ -730,6 +759,7 @@ def _parse_grader_results(stdout: str) -> list[dict]:
                 "label": m.group(1),
                 "score": None,
                 "error": m.group(2).strip(),
+                "type": "grader_error",
             }
         )
 
@@ -772,8 +802,9 @@ def _clean_pytest_details(stdout: str) -> str:
 def parse_pytest_result(stdout: str) -> dict:
     """从 pytest 输出中解析测试结果，返回 total/passed/failed/skipped/errors/score。
 
-    从 pytest 末尾汇总行（如 "4 passed, 1 failed in 5.2s"）提取计数。
-    使用 findall 取最后一个匹配，避免误匹配测试名中的数字（如 test_keyword_0 PASSED）。
+    只从 pytest 末尾汇总行（形如
+    ``===== 4 passed, 1 failed, 2 errors in 5.2s =====``）中提取计数，避免匹配
+    日志噪声（如 ``attempt 1 failed``、``trial 1/3 error`` 等重试日志）。
     """
     result = {
         "total": 0,
@@ -784,17 +815,26 @@ def parse_pytest_result(stdout: str) -> dict:
         "score": 0.0,
     }
 
-    patterns = [
-        (r"(\d+)\s+passed", "passed"),
-        (r"(\d+)\s+failed", "failed"),
-        (r"(\d+)\s+skipped", "skipped"),
-        (r"(\d+)\s+error", "errors"),
-    ]
+    # pytest 汇总行：以 ``=`` 包裹，且同行包含 ``in <time>s``。
+    # 例: ``==== 4 passed, 1 failed, 2 errors in 5.20s ====``
+    summary_pat = re.compile(
+        r"^=+\s+(?P<body>.+?\s+in\s+[\d.]+\s*s(?:\s*\([^)]*\))?)\s+=+\s*$",
+        re.MULTILINE,
+    )
+    summary_matches = list(summary_pat.finditer(stdout))
+    summary_line = summary_matches[-1].group("body") if summary_matches else ""
 
-    for pattern, key in patterns:
-        matches = re.findall(pattern, stdout, re.IGNORECASE)
-        if matches:
-            result[key] = int(matches[-1])
+    if summary_line:
+        patterns = [
+            (r"(\d+)\s+passed\b", "passed"),
+            (r"(\d+)\s+failed\b", "failed"),
+            (r"(\d+)\s+skipped\b", "skipped"),
+            (r"(\d+)\s+errors?\b", "errors"),
+        ]
+        for pattern, key in patterns:
+            m = re.search(pattern, summary_line, re.IGNORECASE)
+            if m:
+                result[key] = int(m.group(1))
 
     result["total"] = result["passed"] + result["failed"] + result["skipped"] + result["errors"]
 
@@ -1315,6 +1355,21 @@ def main():  # noqa: C901
             "details": _clean_pytest_details(stdout_clean) or None,
         }
 
+        hard_terminated = _is_hard_terminated_trajectory(structured_trajectory, final_text)
+        if hard_terminated:
+            log.warning(
+                "[硬截断判 0] task=%s 最后一步发起了工具调用但 tool_results 为空且 content/final_text 均为空，"
+                "整条 task 直接判 0 分（绕过 grader 聚合）",
+                args.task_id,
+            )
+            eval_result["status"] = "failed"
+            eval_result["score"] = 0.0
+            eval_result["hard_terminated"] = True
+            eval_result["hard_terminated_reason"] = (
+                "最后一步发起了工具调用但 tool_results 为空且 content 为空，"
+                "且整条会话无任何最终文本回复"
+            )
+
         _save_summary(
             {
                 "run_name": args.task_id,
@@ -1323,7 +1378,7 @@ def main():  # noqa: C901
                 "summary": {
                     "total_tasks": 1,
                     "completed": 1,
-                    "failed": 0 if result.returncode == 0 else 1,
+                    "failed": 1 if (hard_terminated or result.returncode != 0) else 0,
                     "avg_score": eval_result["score"],
                 },
                 "tasks": [

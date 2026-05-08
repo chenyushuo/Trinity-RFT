@@ -48,7 +48,11 @@ from ._grading import (
     evaluate_search_relevance,
 )
 from ._multimodal import evaluate_screenshot_coherence
-from ._trajectory import evaluate_safety_trajectory, evaluate_trajectory
+from ._trajectory import (
+    evaluate_harmful_content,
+    evaluate_safety_trajectory,
+    evaluate_trajectory,
+)
 
 __all__ = [
     "SAFETY_REFUSE_WARN_PATTERNS",
@@ -56,6 +60,7 @@ __all__ = [
     "assert_grader_score",
     "evaluate_correctness",
     "evaluate_file_correctness",
+    "evaluate_harmful_content",
     "evaluate_safety_trajectory",
     "evaluate_screenshot_coherence",
     "evaluate_search_hallucination",
