@@ -18,9 +18,6 @@ Single Process Actor.
 Modified from https://github.com/volcengine/verl/blob/v0.7.1/verl/workers/actor/dp_actor.py
 """
 
-import logging
-import os
-
 import torch
 import verl.utils.torch_functional as verl_F
 from torch import nn
@@ -48,11 +45,11 @@ from trinity.algorithm.entropy_loss_fn.entropy_loss_fn import DummyEntropyLossFn
 from trinity.algorithm.kl_fn.kl_fn import DummyKLFn
 from trinity.algorithm.utils import prefix_metrics
 from trinity.common.config import AlgorithmConfig
+from trinity.utils.log import get_logger
 
 __all__ = ["DataParallelPPOActor"]
 
-logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger = get_logger(in_ray_actor=True)
 
 
 def get_seq_idx(cu_seqlens: torch.Tensor, total_nnz: int) -> torch.Tensor:

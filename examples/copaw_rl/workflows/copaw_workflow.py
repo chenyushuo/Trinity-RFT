@@ -4,10 +4,9 @@ from typing import List, Optional
 import qwen_vl_utils
 import torch
 import transformers
-from qwen_vl_utils import process_vision_info
 
 from trinity.common.experience import Experience
-from trinity.common.models.mm_utils import build_mm_input_for_training
+from trinity.common.models.mm_utils import ClientMultiModalProcessor
 from trinity.common.models.model import ModelWrapper
 from trinity.common.workflows import WORKFLOWS
 from trinity.common.workflows.workflow import MultiTurnWorkflow, Task
@@ -147,6 +146,7 @@ class CoPawWorkflow(MultiTurnWorkflow):
 
         exps = []
         processor = None
+        vllm_processor = ClientMultiModalProcessor(model_name=model_path)
         for data in dataset:
             prompt_token_ids = torch.tensor(data["prompt_token_ids"])
             response_token_ids = torch.tensor(data["token_ids"])
@@ -160,26 +160,24 @@ class CoPawWorkflow(MultiTurnWorkflow):
             }
 
             messages = data["messages"]
-            with open("debug_messsages.pkl", "wb") as f:
-                import pickle
-
-                pickle.dump(messages, f)
-            image_inputs, video_inputs = process_vision_info(messages)
-            if image_inputs or video_inputs:
+            _, mm_data, _ = vllm_processor.process_messages(messages)
+            if mm_data is not None:
                 if processor is None:
                     processor = transformers.AutoProcessor.from_pretrained(model_path)
-                multi_modal_data = {}
-                if image_inputs:
-                    multi_modal_data["image_inputs"] = image_inputs
-                if video_inputs:
-                    multi_modal_data["video_inputs"] = video_inputs
-                prompt = processor.decode(token_ids)
-
-                multi_modal_inputs = build_mm_input_for_training(
-                    processor, prompt, multi_modal_data
-                )
-                multi_modal_inputs.pop("input_ids", None)
-                multi_modal_inputs.pop("attention_mask", None)
+                multi_modal_inputs = {}
+                # outputs_kwargs = processor._merge_kwargs(
+                #     Qwen3VLProcessorKwargs,
+                #     tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+                #     return_tensors="pt",
+                # )
+                if images := mm_data.get("image", None):
+                    images = [img.media for img in images]
+                    image_inputs = processor.image_processor(images=images, return_tensors="pt")
+                    multi_modal_inputs.update(image_inputs)
+                if videos := mm_data.get("video", None):
+                    videos = [vid.media for vid in videos]
+                    video_inputs = processor.video_processor(videos=videos, return_tensors="pt")
+                    multi_modal_inputs.update(video_inputs)
             else:
                 multi_modal_inputs = None
 
@@ -193,7 +191,7 @@ class CoPawWorkflow(MultiTurnWorkflow):
                 multi_modal_inputs=multi_modal_inputs,
             )
             exps.append(exp)
-        del processor
+        del processor, vllm_processor
 
         self.logger.info(
             f"Workflow finished in {time.time() - start_time:.2f} seconds. Sandbox {'created' if created else 'connected'} "

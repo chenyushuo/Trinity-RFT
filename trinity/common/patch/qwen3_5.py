@@ -7,6 +7,7 @@ import torch.distributed as dist
 from torch import Tensor
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     BaseModelOutputWithPast,
+    BaseModelOutputWithPooling,
     Cache,
     F,
     Qwen3_5CausalLMOutputWithPast,
@@ -15,6 +16,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     TransformersKwargs,
     Unpack,
     apply_mask_to_padding_states,
+    can_return_tuple,
     capture_outputs,
     create_causal_mask,
     merge_with_config_defaults,
@@ -414,6 +416,186 @@ def qwen35_text_forward(
     return Qwen3_5ModelOutputWithPast(
         last_hidden_state=hidden_states,
         past_key_values=past_key_values,
+    )
+
+
+def qwen35_vision_fast_pos_embed_interpolate(self, grid_thw):
+    grid_thw_list = grid_thw.tolist()
+    grid_ts = [row[0] for row in grid_thw_list]
+    grid_hs = [row[1] for row in grid_thw_list]
+    grid_ws = [row[2] for row in grid_thw_list]
+    device = grid_thw.device
+
+    idx_list = [[] for _ in range(4)]
+    weight_list = [[] for _ in range(4)]
+
+    for t, h, w in grid_thw_list:
+        h_idxs = torch.linspace(0, self.num_grid_per_side - 1, h)
+        w_idxs = torch.linspace(0, self.num_grid_per_side - 1, w)
+
+        h_idxs_floor = h_idxs.int()
+        w_idxs_floor = w_idxs.int()
+        h_idxs_ceil = (h_idxs.int() + 1).clip(max=self.num_grid_per_side - 1)
+        w_idxs_ceil = (w_idxs.int() + 1).clip(max=self.num_grid_per_side - 1)
+
+        dh = h_idxs - h_idxs_floor
+        dw = w_idxs - w_idxs_floor
+
+        base_h = h_idxs_floor * self.num_grid_per_side
+        base_h_ceil = h_idxs_ceil * self.num_grid_per_side
+
+        indices = [
+            (base_h[None].T + w_idxs_floor[None]).flatten(),
+            (base_h[None].T + w_idxs_ceil[None]).flatten(),
+            (base_h_ceil[None].T + w_idxs_floor[None]).flatten(),
+            (base_h_ceil[None].T + w_idxs_ceil[None]).flatten(),
+        ]
+
+        weights = [
+            ((1 - dh)[None].T * (1 - dw)[None]).flatten(),
+            ((1 - dh)[None].T * dw[None]).flatten(),
+            (dh[None].T * (1 - dw)[None]).flatten(),
+            (dh[None].T * dw[None]).flatten(),
+        ]
+
+        for i in range(4):
+            idx_list[i].extend(indices[i].tolist())
+            weight_list[i].extend(weights[i].tolist())
+
+    idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=device)
+    weight_tensor = torch.tensor(weight_list, dtype=self.pos_embed.weight.dtype, device=device)
+    pos_embeds = self.pos_embed(idx_tensor).to(device) * weight_tensor[:, :, None]
+    patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
+
+    patch_pos_embeds = patch_pos_embeds.split([h * w for h, w in zip(grid_hs, grid_ws)])
+
+    patch_pos_embeds_permute = []
+    merge_size = self.config.spatial_merge_size
+    for pos_embed, t, h, w in zip(patch_pos_embeds, grid_ts, grid_hs, grid_ws):
+        pos_embed = pos_embed.repeat(t, 1)
+        pos_embed = (
+            pos_embed.view(t, h // merge_size, merge_size, w // merge_size, merge_size, -1)
+            .permute(0, 1, 3, 2, 4, 5)
+            .flatten(0, 4)
+        )
+        patch_pos_embeds_permute.append(pos_embed)
+    patch_pos_embeds = torch.cat(patch_pos_embeds_permute)
+    return patch_pos_embeds
+
+
+@can_return_tuple
+def qwen35_model_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: torch.Tensor | None = None,
+    position_ids: torch.LongTensor | None = None,
+    past_key_values: Cache | None = None,
+    inputs_embeds: torch.FloatTensor | None = None,
+    pixel_values: torch.Tensor | None = None,
+    pixel_values_videos: torch.FloatTensor | None = None,
+    image_grid_thw: torch.LongTensor | None = None,
+    video_grid_thw: torch.LongTensor | None = None,
+    mm_token_type_ids: torch.IntTensor | None = None,
+    **kwargs: Unpack[TransformersKwargs],
+) -> tuple | Qwen3_5ModelOutputWithPast:
+    r"""
+    image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+        The temporal, height and width of feature shape of each image in LLM.
+    video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
+        The temporal, height and width of feature shape of each video in LLM.
+    """
+    if (input_ids is None) ^ (inputs_embeds is not None):
+        raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+    if inputs_embeds is None:
+        inputs_embeds = self.get_input_embeddings()(input_ids)
+
+    vision_config = self.config.vision_config
+    pixel_values_dim = (
+        vision_config.in_channels
+        * vision_config.temporal_patch_size
+        * (vision_config.patch_size**2)
+    )
+    merge_size = vision_config.spatial_merge_size
+
+    device = inputs_embeds.device
+    has_mm_local = torch.tensor(
+        [int(pixel_values is not None), int(pixel_values_videos is not None)], device=device
+    )
+    has_mm_global = has_mm_local.clone()
+    if dist.is_initialized():
+        dist.all_reduce(has_mm_global)
+    has_mm_global = has_mm_global > 0
+
+    # check images
+    if has_mm_global[0].item():
+        if not has_mm_local[0].item():
+            pixel_values = torch.zeros(
+                (merge_size * merge_size, pixel_values_dim), dtype=torch.float32, device=device
+            )
+            image_grid_thw = torch.ones((1, 3), dtype=torch.int64, device=device)
+            image_grid_thw[:, 1:] = merge_size
+
+        image_outputs: BaseModelOutputWithPooling = self.get_image_features(
+            pixel_values, image_grid_thw, return_dict=True
+        )
+        image_embeds = image_outputs.pooler_output
+        image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+
+        if has_mm_local[0].item():
+            image_mask, _ = self.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+        else:  # patched for backward
+            inputs_embeds[0] = inputs_embeds[0] + image_embeds[0] * 0.0
+
+    # check videos
+    if has_mm_global[1].item():
+        if not has_mm_local[1].item():
+            pixel_values_videos = torch.zeros(
+                (merge_size * merge_size, pixel_values_dim), dtype=torch.float32, device=device
+            )
+            video_grid_thw = torch.ones((1, 3), dtype=torch.int64, device=device)
+            video_grid_thw[:, 1:] = merge_size
+
+        video_outputs: BaseModelOutputWithPooling = self.get_video_features(
+            pixel_values_videos, video_grid_thw, return_dict=True
+        )
+        video_embeds = video_outputs.pooler_output
+        video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+
+        if has_mm_local[1].item():
+            _, video_mask = self.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+        else:  # patched for backward
+            inputs_embeds[0] = inputs_embeds[0] + video_embeds[0] * 0.0
+
+    if position_ids is None:
+        position_ids = self.compute_3d_position_ids(
+            input_ids=input_ids,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            mm_token_type_ids=mm_token_type_ids,
+        )
+
+    outputs = self.language_model(
+        input_ids=None,
+        position_ids=position_ids,
+        attention_mask=attention_mask,
+        past_key_values=past_key_values,
+        inputs_embeds=inputs_embeds,
+        **kwargs,
+    )
+
+    return Qwen3_5ModelOutputWithPast(
+        **outputs,
+        rope_deltas=self.rope_deltas,
     )
 
 

@@ -15,8 +15,21 @@ Note:
     Only processors with class names containing both ("Qwen", "Kimi" OR "Glm") AND "Processor" are supported.
     Relies on `qwen_vl_utils.process_vision_info` for media extraction.
 """
+import asyncio
 import re
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
+
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    ChatTemplateContentFormat,
+    ConversationMessage,
+    parse_chat_messages,
+    parse_chat_messages_async,
+)
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
+from trinity.utils.log import get_logger
 
 
 def is_qwen_like_processor(processor: Any) -> bool:
@@ -217,3 +230,231 @@ def has_multi_modal_content(messages: List[Dict]) -> bool:
                 if item.get("type", "text") != "text":
                     return True
     return False
+
+
+class ClientMultiModalProcessor:
+    """
+    Client-side processor that mirrors vLLM server's multimodal handling.
+
+    This class enables RL training endpoints to extract multimodal data
+    with identical processing to the inference server, ensuring consistency.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        model_path: Optional[str] = None,
+        *,
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+        allowed_local_media_path: str = "",
+        allowed_media_domains: Optional[list[str]] = None,
+        trust_request_chat_template: bool = False,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    ):
+        """
+        Initialize the client-side multimodal processor.
+
+        Args:
+            model_name: Model identifier (e.g., 'llava-1.5-7b')
+            model_path: Path to the model (optional, will use default if not provided)
+            media_io_kwargs: Media I/O configuration (mirrors --media-io-kwargs)
+            allowed_local_media_path: Path to allowed local media directory
+            allowed_media_domains: List of allowed media domains
+            trust_request_chat_template: Whether to trust request-provided chat template
+            mm_processor_kwargs: Additional processor kwargs for multimodal processing
+        """
+        self.logger = get_logger(__name__)
+
+        self.model_name = model_name
+        self.model_path = model_path
+        self.media_io_kwargs = media_io_kwargs or {}
+        self.mm_processor_kwargs = mm_processor_kwargs or {}
+
+        # Initialize ModelConfig
+        self.model_config = self._create_model_config(
+            model_name,
+            model_path,
+            media_io_kwargs=self.media_io_kwargs,
+        )
+
+        # Initialize multimodal processor if the model supports it
+        self.mm_processor = None
+        if self.model_config.is_multimodal_model:
+            try:
+                self.mm_processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
+                self.logger.info("Initialized multimodal processor for model: %s", model_name)
+            except Exception as e:
+                self.logger.warning(
+                    "Failed to initialize multimodal processor: %s. "
+                    "Some multimodal features may be unavailable.",
+                    e,
+                )
+
+        # Store media connector configuration
+        self._media_connector_config = {
+            "media_io_kwargs": self.media_io_kwargs,
+            "allowed_local_media_path": allowed_local_media_path,
+            "allowed_media_domains": allowed_media_domains or [],
+        }
+
+        self.trust_request_chat_template = trust_request_chat_template
+
+    def _create_model_config(
+        self,
+        model_name: str,
+        model_path: Optional[str] = None,
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> ModelConfig:
+        """
+        Create a ModelConfig instance matching the server configuration.
+
+        This requires the model to be loadable from HuggingFace or local path.
+        """
+        # Create ModelConfig with multimodal support
+        model_config = ModelConfig(
+            model=model_name,
+            tokenizer=model_name,
+            tokenizer_mode="auto",
+            trust_remote_code=True,
+        )
+
+        return model_config
+
+    def process_messages(
+        self,
+        messages: list[dict[str, Any]],
+        content_format: ChatTemplateContentFormat = "string",
+        use_async: bool = False,
+    ) -> tuple[
+        list[ConversationMessage],
+        Optional[MultiModalDataDict],
+        Optional[MultiModalUUIDDict],
+    ]:
+        """
+        Process chat messages and extract multimodal data.
+
+        This replicates the server-side parse_chat_messages behavior.
+
+        Args:
+            messages: List of chat messages with potential multimodal content
+            content_format: Chat template content format ("string" or "openai")
+            use_async: Whether to use async processing for media fetching
+
+        Returns:
+            Tuple of (conversation, mm_data, mm_uuids) matching server output
+        """
+        if use_async:
+            return asyncio.run(self.process_messages_async(messages, content_format))
+
+        conversation, mm_data, mm_uuids = parse_chat_messages(
+            messages=messages,
+            model_config=self.model_config,
+            content_format=content_format,
+            media_io_kwargs=self._media_connector_config["media_io_kwargs"],
+            mm_processor_kwargs=self.mm_processor_kwargs,
+        )
+
+        return conversation, mm_data, mm_uuids
+
+    async def process_messages_async(
+        self,
+        messages: list[dict[str, Any]],
+        content_format: ChatTemplateContentFormat = "string",
+    ) -> tuple[
+        list[ConversationMessage],
+        Optional[MultiModalDataDict],
+        Optional[MultiModalUUIDDict],
+    ]:
+        """
+        Async version of process_messages for concurrent media fetching.
+        """
+        conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+            messages=messages,
+            model_config=self.model_config,
+            content_format=content_format,
+            media_io_kwargs=self._media_connector_config["media_io_kwargs"],
+            mm_processor_kwargs=self.mm_processor_kwargs,
+        )
+
+        return conversation, mm_data, mm_uuids
+
+    def apply_mm_processor(
+        self,
+        mm_data: Optional[MultiModalDataDict],
+        mm_uuids: Optional[MultiModalUUIDDict],
+    ) -> dict[str, Any]:
+        """
+        Apply the multimodal processor to convert raw media to embeddings.
+
+        This step mirrors the server's mm_processor.apply() call.
+
+        Args:
+            mm_data: Raw multimodal data dict
+            mm_uuids: Multimodal UUIDs for tracking
+
+        Returns:
+            Processed multimodal inputs (embeddings, etc.)
+        """
+        if not self.mm_processor or not mm_data:
+            return {}
+
+        try:
+            from vllm.multimodal.processing import MMProcessorInputs
+            from vllm.renderers.inputs.preprocess import set_default_torch_num_threads
+
+            mm_processor_inputs = MMProcessorInputs(
+                prompt="",  # Prompt already tokenized
+                mm_data_items=self.mm_processor.info.parse_mm_data(mm_data),
+                mm_uuid_items={} if not mm_uuids else mm_uuids,
+                hf_processor_mm_kwargs=self.mm_processor_kwargs.copy(),
+                tokenization_kwargs={},
+            )
+
+            with set_default_torch_num_threads():
+                mm_inputs = self.mm_processor.apply(
+                    mm_processor_inputs,
+                    timing_ctx=None,
+                )
+
+            return mm_inputs
+        except Exception as e:
+            self.logger.error(
+                "Failed to apply multimodal processor: %s. " "Returning raw mm_data instead.", e
+            )
+            return {"mm_data": mm_data, "mm_uuids": mm_uuids}
+
+    def get_mm_data_for_training(
+        self,
+        messages: list[dict[str, Any]],
+        include_processed: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Extract multimodal data in a training-friendly format.
+
+        This is a convenience method that combines all processing steps
+        and returns a dict suitable for RL training.
+
+        Args:
+            messages: Chat messages with multimodal content
+            include_processed: Whether to include processed embeddings
+
+        Returns:
+            Dict containing:
+                - "conversation": processed conversation messages
+                - "mm_data": raw multimodal data
+                - "mm_uuids": multimodal identifiers
+                - "mm_inputs" (optional): processed multimodal inputs
+        """
+        conversation, mm_data, mm_uuids = self.process_messages(messages)
+
+        result = {
+            "conversation": conversation,
+            "mm_data": mm_data,
+            "mm_uuids": mm_uuids,
+        }
+
+        if include_processed and mm_data:
+            mm_inputs = self.apply_mm_processor(mm_data, mm_uuids)
+            result["mm_inputs"] = mm_inputs
+
+        return result

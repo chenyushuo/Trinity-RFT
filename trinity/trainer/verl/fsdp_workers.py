@@ -130,7 +130,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 timeout=datetime.timedelta(seconds=self.config.get("nccl_timeout", 600)),
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
+
+        # setup logger
         self.logger = get_logger(f"{role}_{self.rank}", in_ray_actor=True)
+        import builtins
+
+        builtins.print = lambda *args, **kwargs: self.logger.info(" ".join(map(str, args)))
 
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
@@ -343,11 +348,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         actor_model_config = AutoConfig.from_pretrained(
             local_path, trust_remote_code=trust_remote_code, attn_implementation=attn_implementation
         )
-        # TODO: VL models use VisionAttention, which directly uses flash_attention in transformers>=4.53
-        # which will be patched by _ulysses_flash_attention_forward, but errorly misses position_ids
-        # Maybe support Ulysses in VisionAttention in the future and remove this patch
-        if self.ulysses_sequence_parallel_size > 1 and hasattr(actor_model_config, "vision_config"):
-            actor_model_config.vision_config._attn_implementation = "eager"
 
         # patch for qwen2.5-vl: when using flash_attention_3, set vision tower to use flash_attention_2
         # because the vision tower does not support flash_attention_3
@@ -383,9 +383,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.logger.info(f"Model config after override: {actor_model_config}")
 
         use_meta = (
-            self.rank != 0
-            if self.device_mesh is None
-            else self.device_mesh.get_coordinate()[-1] != 0
+            (
+                self.rank != 0
+                if self.device_mesh is None
+                else self.device_mesh.get_coordinate()[-1] != 0
+            )
+            if self.config.actor.strategy == "fsdp2"
+            else False
         )
 
         init_context = torch.device("meta") if use_meta else torch.device("cpu")
@@ -1200,7 +1204,12 @@ class CriticWorker(Worker, DistProfilerExtension):
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
 
+        # Setup logger
         self.logger = get_logger(f"critic_{self.rank}", in_ray_actor=True)
+        import builtins
+
+        builtins.print = lambda *args, **kwargs: self.logger.info(" ".join(map(str, args)))
+
         self.config: FSDPCriticConfig = config
 
         # build device mesh for Ulysses Sequence Parallel
