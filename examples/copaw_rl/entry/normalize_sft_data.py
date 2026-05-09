@@ -94,7 +94,7 @@ def process_batch(batch, model_path):
         system_prompt=None,
         messages_key="messages",
         tools_key="tools",
-        image_key=None,
+        image_key="image_placeholder",
         video_key=None,
         reply_prefix=None,
         workflow_key="",
