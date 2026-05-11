@@ -54,7 +54,7 @@ buffer:
           endpoint: ${oc.env:OSS_ENDPOINT,"oss-cn-beijing-internal.aliyuncs.com"}
           bucket_name: ${oc.env:OSS_BUCKET_NAME,"copaw-dataset"}
           prefix: ${oc.env:OSS_PREFIX,"data/0318_train_tasks_compressed/"}
-      default_workflow_type: copaw_workflow  # examples.copaw_rl.workflows.CoPawWorkflow
+      default_workflow_type: copaw_rl_workflow  # examples.copaw_rl.workflows.CoPawRLWorkflow
     eval_tasksets: []
   trainer_input:
     experience_buffer:

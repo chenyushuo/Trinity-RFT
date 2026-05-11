@@ -91,8 +91,8 @@ def patch_qwen_vl_utils():
     qwen_vl_utils._is_patched = True
 
 
-@WORKFLOWS.register_module("copaw_workflow")
-class CoPawWorkflow(MultiTurnWorkflow):
+@WORKFLOWS.register_module("copaw_rl_workflow")
+class CoPawRLWorkflow(MultiTurnWorkflow):
     def __init__(
         self,
         *,

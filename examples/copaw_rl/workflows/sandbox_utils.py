@@ -6,11 +6,17 @@ import pickle
 import time
 import zipfile
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import httpx
 import numpy as np
-from e2b import CommandExitException, NotFoundException, Sandbox
+from e2b import (
+    CommandExitException,
+    NotFoundException,
+    Sandbox,
+    SandboxException,
+    TimeoutException,
+)
 
 
 # ANSI color codes
@@ -178,6 +184,40 @@ def get_or_create_sandbox(sandbox_id, token, domain, template, logger) -> Tuple[
         return sandbox, True
 
 
+def run_with_reconnect(sandbox: Sandbox, cmd, envs, logger, max_retries=5):
+    # 1. 后台启动命令
+    handle = sandbox.commands.run(
+        cmd,
+        background=True,
+        envs=envs,
+        timeout=1200,  # 30 min; was 3600
+        request_timeout=1800,
+    )
+    pid = handle.pid
+
+    for attempt in range(max_retries):
+        try:
+            # 2. 等待命令完成（此处维持 streaming 接收输出）
+            result = handle.wait(
+                on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
+                on_stderr=lambda data: logger.info(f"[stderr]: {data.rstrip()}"),
+            )
+            return result
+        except TimeoutException as e:
+            logger.warning(f"连接断开 (attempt {attempt + 1}): {e}")
+            time.sleep(3)
+            if attempt != max_retries - 1:
+                # 3. 重连到 sandbox 和进程
+                handle = sandbox.commands.connect(
+                    pid,
+                    timeout=1200,
+                    request_timeout=1800,
+                )
+            else:
+                raise e
+    return None
+
+
 def launch_run_py(
     sandbox: Sandbox, cmd: str, oss_config, dashscope_api_key, logger, raise_error=False
 ):
@@ -199,14 +239,7 @@ def launch_run_py(
         envs["AUTO_EVAL_GENERATE_KWARGS"] = gen_kwargs
     try:
         logger.info(f"Running command in sandbox: {cmd}")
-        result = sandbox.commands.run(
-            cmd,
-            envs=envs,
-            timeout=1200,  # 30 min; was 3600
-            request_timeout=1800,
-            on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
-            on_stderr=lambda data: logger.info(f"[stderr]: {data.rstrip()}"),
-        )
+        result = run_with_reconnect(sandbox, cmd, envs, logger)
         run_outputs = result.stdout + "\n" + result.stderr
     except CommandExitException as e:
         logger.info("run.py exited with non-zero exit code: %s", e.exit_code)
@@ -219,6 +252,17 @@ def launch_run_py(
     return latency_seconds, run_outputs
 
 
+def _download_file(sandbox: Sandbox, remote_path: str, logger, format: Optional[str] = None):
+    for attempt in range(30):
+        try:
+            content = sandbox.files.read(remote_path, format=format)
+            return content
+        except SandboxException as e:
+            logger.warning(f"Attempt {attempt + 1}/30: {remote_path} not ready, retrying... ({e})")
+            time.sleep(2)
+    raise FileNotFoundError(f"{remote_path} not found in sandbox after multiple attempts")
+
+
 def run_workflow(
     sandbox: Sandbox, task_id, oss_config, dashscope_api_key, api_server_url, model_path, logger
 ):
@@ -228,7 +272,7 @@ def run_workflow(
     )
     _, _ = launch_run_py(sandbox, cmd, oss_config, dashscope_api_key, logger, raise_error=True)
 
-    content = sandbox.files.read("/root/dataset.pkl", format="bytes")
+    content = _download_file(sandbox, "/root/dataset.pkl", logger, format="bytes")
     dataset = pickle.loads(content)
     return dataset
 
