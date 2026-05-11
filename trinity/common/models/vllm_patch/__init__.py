@@ -39,7 +39,8 @@ def vllm_patch():
                 original_init(self, *args, **kwargs)
 
             PreTrainedConfig.__init__ = new_init
-    if parse_version("0.20.0") <= vllm_version <= parse_version("0.20.1"):
+    if parse_version("0.20.0") <= vllm_version:
+        # TODO: add upper bound when following PR is merged
         # https://github.com/vllm-project/vllm/pull/39772/changes
         from vllm.tool_parsers.qwen3coder_tool_parser import (
             FunctionCall,

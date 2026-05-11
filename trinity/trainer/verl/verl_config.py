@@ -251,6 +251,7 @@ class CriticModel:
     enable_gradient_checkpointing: bool = True
     use_remove_padding: bool = True
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
+    freeze_vision_tower: bool = False
 
     # rope configs
     rope_scaling: Optional[dict] = None

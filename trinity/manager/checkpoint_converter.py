@@ -166,7 +166,7 @@ class Converter:
             from verl.utils.transformers_compat import is_transformers_version_in_range
 
             save_kwargs = dict(state_dict=state_dict)
-            if is_transformers_version_in_range(max_version="5.5.4"):
+            if is_transformers_version_in_range(min_version="5.4.0", max_version="5.5.4"):
                 save_kwargs["save_original_format"] = False
             model.save_pretrained(huggingface_dir, **save_kwargs)
             self.logger.info(f"Saved huggingface checkpoint to {huggingface_dir}")

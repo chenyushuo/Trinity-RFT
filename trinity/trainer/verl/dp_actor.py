@@ -54,27 +54,32 @@ logger = get_logger(in_ray_actor=True)
 
 def get_seq_idx(cu_seqlens: torch.Tensor, total_nnz: int) -> torch.Tensor:
     """
-    根据 cu_seqlens 生成 seq_idx，表明 packing 后序列每个位置对应原始的 sequence id。
+    Build `seq_idx` from `cu_seqlens`, mapping each packed position to its
+    original sequence id.
 
-    Arguments:
-        cu_seqlens: (batch + 1,), 累积序列长度，来自 unpad_input 的输出。
-                    例如 [0, 3, 7, 10] 表示第0条序列长度3，第1条长度4，第2条长度3。
-        total_nnz: int, packed 后的总 token 数，即 cu_seqlens[-1]。
+    Args:
+        cu_seqlens: Shape (batch + 1,). Cumulative sequence lengths from
+            `unpad_input`.
+            For example, [0, 3, 7, 10] means sequence 0 has length 3,
+            sequence 1 has length 4, and sequence 2 has length 3.
+        total_nnz: Total number of packed tokens, i.e. `cu_seqlens[-1]`.
 
     Returns:
-        seq_idx: (total_nnz,), 每个位置对应原始序列的 id（0-indexed）。
-                 例如 [0, 0, 0, 1, 1, 1, 1, 2, 2, 2]
+        Shape (total_nnz,), where each position is the original sequence id
+        (0-indexed). For example, [0, 0, 0, 1, 1, 1, 1, 2, 2, 2].
     """
     device = cu_seqlens.device
     batch_size = cu_seqlens.shape[0] - 1
     seq_idx = torch.zeros(total_nnz, dtype=torch.int32, device=device)
 
-    # 利用 cu_seqlens 的差分，在对应起始位置填 1，然后 cumsum 得到 seq_idx
-    # 例如 cu_seqlens = [0, 3, 7, 10]
-    # 在 index [3, 7] 处填 1，cumsum 后得到 [0,0,0,1,1,1,1,2,2,2]
+    # Use cu_seqlens differences: place 1 at each sequence start index, then
+    # apply cumsum to recover sequence ids.
+    # Example: cu_seqlens = [0, 3, 7, 10]
+    # Set 1 at indices [3, 7], then cumsum -> [0,0,0,1,1,1,1,2,2,2]
     seq_idx.scatter_(
         dim=0,
-        index=cu_seqlens[1:-1].long(),  # 每个新序列起始位置（去掉最后一个，因为不需要在末尾标记）
+        # Start index of each new sequence (exclude the last endpoint).
+        index=cu_seqlens[1:-1].long(),
         src=torch.ones(batch_size - 1, dtype=torch.int32, device=device),
     )
     seq_idx = seq_idx.cumsum(dim=0, dtype=torch.int32)

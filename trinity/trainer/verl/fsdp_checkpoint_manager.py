@@ -362,7 +362,7 @@ class FSDPCheckpointManager(OldFSDPCheckpointManager):
                     self.checkpoint_monitor.notify_started.remote(node_id=node_id, job_id=job_id)
                 )
                 save_kwargs = dict(state_dict=state_dict)
-                if is_transformers_version_in_range(max_version="5.5.4"):
+                if is_transformers_version_in_range(min_version="5.4.0", max_version="5.5.4"):
                     save_kwargs["save_original_format"] = False
                 save_model.save_pretrained(hf_local_path, **save_kwargs)
                 log_with_rank(

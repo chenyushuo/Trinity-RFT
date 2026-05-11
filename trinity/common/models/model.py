@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Base Model Class"""
+
 import asyncio
 import copy
 import random
@@ -13,7 +14,7 @@ import torch
 from torch import Tensor
 
 from trinity.common.config import InferenceModelConfig
-from trinity.common.constants import RunningStatus
+from trinity.common.constants import RunningStatus, SyncMethod
 from trinity.common.experience import Experience
 from trinity.common.models.utils import get_action_mask_method
 from trinity.utils.log import get_logger
@@ -55,7 +56,9 @@ class InferenceModel(ABC):
         pass
 
     @abstractmethod
-    async def sync_model(self, model_version: int) -> int:
+    async def sync_model(
+        self, model_version: int, method: SyncMethod, timeout: float = 1200
+    ) -> int:
         """Sync the model with the latest model_version."""
 
     @abstractmethod
@@ -65,15 +68,27 @@ class InferenceModel(ABC):
     def get_available_address(
         self, min_port: int = 25000, max_port: int = 25020
     ) -> Tuple[str, int]:
-        """Get the address of the actor within a constrained port range."""
-        if not (1 <= min_port <= max_port <= 65535):
-            raise ValueError(f"Invalid port range: {min_port}-{max_port}")
-
+        """Get the address of the actor."""
         # TODO: workaround for ray.util.get_node_ip_address() in DLC
         # address = ray.util.get_node_ip_address()
         import subprocess
 
         address = subprocess.getoutput("hostname -I").strip().split()[0]
+        if self.config.base_port is not None:
+            configured_port = self.config.base_port + (self.config.engine_id % 8)
+            with socket.socket() as s:
+                try:
+                    s.bind(("", configured_port))
+                    return address, configured_port
+                except OSError:
+                    self.logger.warning(
+                        "Configured port %s is unavailable for engine %s; falling back to an ephemeral port.",
+                        configured_port,
+                        self.config.engine_id,
+                    )
+
+        if not (1 <= min_port <= max_port <= 65535):
+            raise ValueError(f"Invalid port range: {min_port}-{max_port}")
         ports = list(range(min_port, max_port + 1))
         random.shuffle(ports)
         for port in ports:
@@ -606,9 +621,9 @@ class ModelWrapper:
             data = response.json()
             return data["server_load"]
 
-    async def sync_model_weights(self, model_version: int) -> None:
+    async def sync_model_weights(self, model_version: int, method: SyncMethod) -> None:
         """Sync the model weights"""
-        await self.model.sync_model.remote(model_version)
+        await self.model.sync_model.remote(model_version, method)
 
     def extract_experience_from_history(self, clear_history: bool = True) -> List[Experience]:
         """Extract experiences from the history."""
