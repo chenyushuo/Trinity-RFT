@@ -23,6 +23,7 @@ import bench_client
 import requests
 import yaml
 from export_training_data import export_training_data
+from otel_init import init_otel, trace_span
 from setup_provider import (
     config_builtin_provider,
     config_provider,
@@ -77,6 +78,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Auto-inject rollout_hint file content into environment/config/SOUL.md",
+    )
+    parser.add_argument(
+        "--enable-otel",
+        action="store_true",
+        default=False,
+        help="Enable OpenTelemetry tracing.",
     )
     return parser.parse_args()
 
@@ -1105,8 +1112,8 @@ def _save_summary(summary: dict) -> None:
     log.info("summary 已保存到: %s", SUMMARY_PATH)
 
 
-def main():  # noqa: C901
-    args = parse_args()
+def main(args=None):  # noqa: C901
+    args = parse_args() if args is None else args
 
     if not args.session_id:
         args.session_id = f"{args.task_id}_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -1204,16 +1211,19 @@ def main():  # noqa: C901
         # Step 4: 调用 agent API
         log.info("调用 agent API ...")
         t_start = time.time()
-        call_agent(
-            url=args.url.strip("/"),
-            user_input=agent_input,
-            session_id=args.session_id,
-            user_id=args.user_id,
-            provider_name=args.provider_name,
-            provider_base_url=args.provider_base_url,
-            provider_api_key=args.provider_api_key,
-            provider_model_id=args.provider_model_id,
-        )
+        with trace_span(
+            "call_agent", {"session_id": args.session_id, "model_id": args.provider_model_id}
+        ):
+            call_agent(
+                url=args.url.strip("/"),
+                user_input=agent_input,
+                session_id=args.session_id,
+                user_id=args.user_id,
+                provider_name=args.provider_name,
+                provider_base_url=args.provider_base_url,
+                provider_api_key=args.provider_api_key,
+                provider_model_id=args.provider_model_id,
+            )
         duration_seconds = round(time.time() - t_start, 2)
         log.info("完成调用 agent API，耗时: %.2f 秒", duration_seconds)
 
@@ -1221,7 +1231,16 @@ def main():  # noqa: C901
         test_dir = os.path.join(_SCRIPT_DIR, "tests")
         os.makedirs(test_dir, exist_ok=True)
 
-        session_file = f"{args.sessions_dir}/{args.user_id}_{args.session_id}.json"
+        session_file_candidates = [
+            f"{args.sessions_dir}/{args.user_id}_{args.session_id}.json",
+            f"{args.sessions_dir}/console/{args.user_id}_{args.session_id}.json",  # for qwenpaw>=1.1.6
+        ]
+        for session_file in session_file_candidates:
+            if os.path.exists(session_file):
+                break
+        else:
+            log.error("session 文件不存在: %s", session_file_candidates)
+            exit(1)
         log.info("读取 session 文件: %s", session_file)
         session_text = read_file(session_file)
         session_data = json.loads(session_text)
@@ -1237,9 +1256,10 @@ def main():  # noqa: C901
         trajectories = extract_trajectories(session_data)
 
         if not args.evaluation:
-            export_training_data(
-                args.task_id, trajectories, session_data=session_data, input_answer=input_answer
-            )
+            with trace_span("export_training_data", {"trajectories_length": len(trajectories)}):
+                export_training_data(
+                    args.task_id, trajectories, session_data=session_data, input_answer=input_answer
+                )
             return
 
         structured_trajectory = parse_structured_trajectory(session_data)
@@ -1304,22 +1324,23 @@ def main():  # noqa: C901
         # -s/--capture=no：否则「先 print 再 pytest.skip」的用例里，评分行留在
         # pytest 内部 capture，不会进入本进程的 stdout，run.py 无法解析
         # record_only_grader_scores / grader_results。
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-v",
-                "-rP",
-                "-s",
-                test_script,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=_SCRIPT_DIR,
-            env=test_env,
-        )
+        with trace_span("pytest_grader", {"test_script": test_script}):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-v",
+                    "-rP",
+                    "-s",
+                    test_script,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=_SCRIPT_DIR,
+                env=test_env,
+            )
         log.info("测试输出:\n%s", result.stdout)
         log.info("测试错误输出:\n%s", result.stderr)
         log.info("测试退出码: %d", result.returncode)
@@ -1428,4 +1449,24 @@ def main():  # noqa: C901
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    if args.enable_otel:
+        init_otel(attributes={"task_id": args.task_id})
+
+        from openjudge.graders.base_grader import BaseGrader
+
+        if getattr(BaseGrader, "_is_patched", None) is None:
+            BaseGrader._is_patched = True
+
+            original_aevaluate = BaseGrader.aevaluate
+
+            async def new_aevaluate(self: BaseGrader, *args, **kwargs):
+                with trace_span(
+                    "aevaluate", {"grader": self.__class__.__name__, "name": self.name}
+                ):
+                    return await original_aevaluate(self, *args, **kwargs)
+
+            BaseGrader.aevaluate = new_aevaluate
+
+    with trace_span("main"):
+        main(args)

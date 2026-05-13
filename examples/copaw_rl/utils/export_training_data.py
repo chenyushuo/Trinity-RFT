@@ -7,6 +7,7 @@ from urllib import request as urllib_request
 
 import numpy as np
 from judge import llm_judge as dispatch_llm_judge
+from otel_init import trace_span
 
 logging.basicConfig(
     level=logging.INFO,
@@ -164,13 +165,15 @@ def export_training_data(task_id, trajectories, session_data=None, input_answer=
             if isinstance(session_data, dict)
             else {"agent": {"_model_trajectory": trajectories}}
         )
-        reward, judge_reason = _llm_judge(
-            query=query,
-            session_data=judge_session,
-            final_response=final_response,
-            task_id=task_id,
-            input_answer=input_answer,
-        )
+
+        with trace_span("llm_judge"):
+            reward, judge_reason = _llm_judge(
+                query=query,
+                session_data=judge_session,
+                final_response=final_response,
+                task_id=task_id,
+                input_answer=input_answer,
+            )
     except Exception as judge_exc:
         # 判断出错时保守处理：视为失败
         reward, judge_reason = 0.0, f"LLM判断异常(失败): {judge_exc}"

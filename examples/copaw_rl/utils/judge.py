@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
 import yaml
+from otel_init import trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -361,12 +362,13 @@ async def _run_grader_plan(
     info_lines: list[str] = []
 
     for spec in plan:
-        result = await _run_grader_spec(
-            spec,
-            query=query,
-            session=session,
-            input_answer=input_answer,
-        )
+        with trace_span("_run_grader_spec", {"evaluator": spec.evaluator}):
+            result = await _run_grader_spec(
+                spec,
+                query=query,
+                session=session,
+                input_answer=input_answer,
+            )
         log_grader_score_line(result, label=spec.name)
         normalized, reason = _score_from_result(result)
         tag = "score" if spec.include_in_score else "log_only"
@@ -425,14 +427,15 @@ def llm_judge(
     last_error: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
-            score, details = asyncio.run(
-                _run_grader_plan(
-                    plan=plan,
-                    query=str(query),
-                    session=session,
-                    input_answer=input_answer if _answer_is_non_empty(input_answer) else "",
+            with trace_span("_run_grader_plan", {"attempt": attempt}):
+                score, details = asyncio.run(
+                    _run_grader_plan(
+                        plan=plan,
+                        query=str(query),
+                        session=session,
+                        input_answer=input_answer if _answer_is_non_empty(input_answer) else "",
+                    )
                 )
-            )
             break
         except Exception as exc:
             last_error = exc

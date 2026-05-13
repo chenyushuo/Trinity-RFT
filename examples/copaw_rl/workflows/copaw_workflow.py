@@ -124,6 +124,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
         sandbox_id = sandbox.sandbox_id
 
         oss_config = self.task.workflow_args["oss"]
+        otel_config = self.task.workflow_args["otel"]
         dashscope_api_key = self.task.workflow_args["dashscope_api_key"]
         task_id = self.task.raw_task["task_id"]
         api_server_url = f"{self.model.api_address}/v1"
@@ -133,6 +134,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
                 sandbox,
                 task_id,
                 oss_config,
+                otel_config,
                 dashscope_api_key,
                 api_server_url,
                 model_path,

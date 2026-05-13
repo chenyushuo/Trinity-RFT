@@ -54,6 +54,13 @@ buffer:
           endpoint: ${oc.env:OSS_ENDPOINT,"oss-cn-beijing-internal.aliyuncs.com"}
           bucket_name: ${oc.env:OSS_BUCKET_NAME,"copaw-dataset"}
           prefix: ${oc.env:OSS_PREFIX,"data/0318_train_tasks_compressed/"}
+        otel:
+          enable: ${oc.env:OTEL_ENABLE,false}
+          endpoint: ${oc.env:OTEL_EXPORTER_OTLP_ENDPOINT,null}
+          service_name: ${oc.env:OTEL_SERVICE_NAME,qwenpaw-run}
+          arms_license_key: ${oc.env:OTEL_ARMS_LICENSE_KEY,null}
+          arms_project: ${oc.env:OTEL_ARMS_PROJECT,null}
+          cms_workspace: ${oc.env:OTEL_CMS_WORKSPACE,null}
       default_workflow_type: copaw_rl_workflow  # examples.copaw_rl.workflows.CoPawRLWorkflow
     eval_tasksets: []
   trainer_input:

@@ -118,10 +118,7 @@ def update_sandbox_files(sandbox: Sandbox, template, logger):
     - 跳过 __pycache__ 等运行时产物。
     """
     utils_dir = Path(__file__).parent.parent / "utils"
-    with utils_dir.joinpath("md5_maps.json").open("r") as f:
-        md5_maps = json.load(f)
-
-    md5_map = md5_maps.get(template, {})
+    local_md5_map = {}
     for file in utils_dir.rglob("*"):
         if not file.is_file() or file.suffix not in {".py", ".sh"}:
             continue
@@ -131,9 +128,30 @@ def update_sandbox_files(sandbox: Sandbox, template, logger):
         rel_path = file.relative_to(utils_dir).as_posix()
         with open(file, "rb") as f:
             file_md5 = hashlib.file_digest(f, "md5").hexdigest()
-        if md5_map.get(rel_path, "") != file_md5:
-            logger.info(f"Updating sandbox [{sandbox.sandbox_id}] with [{file}]...")
-            with open(file, "r") as f:
+        local_md5_map[rel_path] = file_md5
+
+    # get md5 map in sandbox
+    files = " ".join(local_md5_map.keys())
+    try:
+        result = sandbox.commands.run(f"md5sum {files}")
+        stdout = result.stdout.strip()
+    except CommandExitException as e:
+        stdout = e.stdout.strip()
+    md5_map = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if "No such file or directory" in line:
+            rel_path = line.split(": ")[1]
+            md5_map[rel_path] = None
+        else:
+            md5, rel_path = line.split("  ")
+            md5_map[rel_path] = md5
+
+    # upload files that are missing or different
+    for rel_path, md5 in local_md5_map.items():
+        if md5_map.get(rel_path, None) != md5:
+            logger.info(f"Uploading {rel_path} to sandbox")
+            with open(utils_dir / rel_path, "r") as f:
                 sandbox.files.write(f"/root/{rel_path}", f)
 
 
@@ -219,26 +237,29 @@ def run_with_reconnect(sandbox: Sandbox, cmd, envs, logger, max_retries=5):
 
 
 def launch_run_py(
-    sandbox: Sandbox, cmd: str, oss_config, dashscope_api_key, logger, raise_error=False
+    sandbox: Sandbox, cmd: str, oss_config, dashscope_api_key, logger, envs={}, raise_error=False
 ):
     assert dashscope_api_key, "DASHSCOPE_API_KEY is required to run the workflow"
     dashscope_api_keys = dashscope_api_key.split(",")
     dashscope_api_key = np.random.choice(dashscope_api_keys).item()
     t0 = time.perf_counter()
-    envs = {
-        "OSS_ACCESS_KEY_ID": oss_config["access_key_id"],
-        "OSS_ACCESS_KEY_SECRET": oss_config["access_key_secret"],
-        "OSS_REGION": oss_config["region"],
-        "OSS_ENDPOINT": oss_config["endpoint"],
-        "OSS_BUCKET_NAME": oss_config["bucket_name"],
-        "DASHSCOPE_API_KEY": dashscope_api_key,
-    }
+    envs.update(
+        {
+            "OSS_ACCESS_KEY_ID": oss_config["access_key_id"],
+            "OSS_ACCESS_KEY_SECRET": oss_config["access_key_secret"],
+            "OSS_REGION": oss_config["region"],
+            "OSS_ENDPOINT": oss_config["endpoint"],
+            "OSS_BUCKET_NAME": oss_config["bucket_name"],
+            "DASHSCOPE_API_KEY": dashscope_api_key,
+        }
+    )
     # auto_eval.py 注入的每请求 sampling kwargs（JSON 字符串），透传给沙箱里的 run.py
     gen_kwargs = os.environ.get("AUTO_EVAL_GENERATE_KWARGS")
     if gen_kwargs:
         envs["AUTO_EVAL_GENERATE_KWARGS"] = gen_kwargs
     try:
         logger.info(f"Running command in sandbox: {cmd}")
+        logger.info(f"Sandbox envs: {envs}")
         result = run_with_reconnect(sandbox, cmd, envs, logger)
         run_outputs = result.stdout + "\n" + result.stderr
     except CommandExitException as e:
@@ -263,14 +284,45 @@ def _download_file(sandbox: Sandbox, remote_path: str, logger, format: Optional[
     raise FileNotFoundError(f"{remote_path} not found in sandbox after multiple attempts")
 
 
+def _setup_otel_envs(otel_config: dict = {}):
+    key_map = {
+        "endpoint": "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "service_name": "OTEL_SERVICE_NAME",
+        "arms_license_key": "OTEL_ARMS_LICENSE_KEY",
+        "arms_project": "OTEL_ARMS_PROJECT",
+        "cms_workspace": "OTEL_CMS_WORKSPACE",
+    }
+    envs = {}
+    for k, v in key_map.items():
+        if v in os.environ:
+            envs[v] = os.environ[v]
+        if otel_config.get(k, None) is not None:
+            envs[v] = str(otel_config[k])
+    return envs
+
+
 def run_workflow(
-    sandbox: Sandbox, task_id, oss_config, dashscope_api_key, api_server_url, model_path, logger
+    sandbox: Sandbox,
+    task_id,
+    oss_config,
+    otel_config,
+    dashscope_api_key,
+    api_server_url,
+    model_path,
+    logger,
 ):
     cmd = (
         f"python run.py --task-id {task_id} --oss-prefix {oss_config['prefix']} "
         f"--provider-base-url {api_server_url} --provider-model-id {model_path}"
     )
-    _, _ = launch_run_py(sandbox, cmd, oss_config, dashscope_api_key, logger, raise_error=True)
+    envs = {}
+    enable_otel = otel_config.pop("enable", False)
+    if enable_otel:
+        cmd += " --enable-otel"
+        envs.update(_setup_otel_envs(otel_config))
+    _, _ = launch_run_py(
+        sandbox, cmd, oss_config, dashscope_api_key, logger, envs=envs, raise_error=True
+    )
 
     content = _download_file(sandbox, "/root/dataset.pkl", logger, format="bytes")
     dataset = pickle.loads(content)
@@ -481,6 +533,9 @@ if __name__ == "__main__":
     parser.add_argument("--token", type=str, default=os.environ.get("E2B_API_KEY", None))
     parser.add_argument("--domain", type=str, default=os.environ.get("E2B_DOMAIN", None))
     parser.add_argument("--template", type=str, default=os.environ.get("E2B_TEMPLATE", None))
+    parser.add_argument(
+        "--enable-otel", action="store_true", help="Whether to set up OpenTelemetry in the sandbox"
+    )
     args = parser.parse_args()
 
     from trinity.utils.log import get_logger
@@ -497,10 +552,15 @@ if __name__ == "__main__":
         with open(patch_file, "r") as f:
             sandbox.files.write(f"/root/patch/{patch_file.name}", f)
 
+    if args.enable_otel:
+        otel_envs = _setup_otel_envs()
+        logger.info(f"OTEL envs for sandbox: {otel_envs}")
+    else:
+        otel_envs = {}
     try:
         result = sandbox.commands.run(
             "pip uninstall qwenpaw -y && "
-            "pip install qwenpaw==v1.1.5post2 && "
+            "pip install qwenpaw==v1.1.6 && "
             "pip install oss2 pytest py-openjudge pytest-asyncio && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/model_trajectory.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_openai_model.py < /root/patch/openai_model.patch && "
@@ -509,20 +569,25 @@ if __name__ == "__main__":
             "apt-get install -y xfce4 xfce4-goodies x11vnc openbox xvfb novnc websockify supervisor dbus-x11 && "
             "rm -rf /var/lib/apt/lists/* && "
             "echo '100.118.58.9    copaw-dataset.oss-cn-beijing-internal.aliyuncs.com' >> /etc/hosts && "
+            "bash /root/setup_otel.sh && "
+            "pip install --no-cache-dir 'wrapt<2' && "
             "qwenpaw init --defaults --accept-security",
-            timeout=3600,
+            envs=otel_envs,
             on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
             on_stderr=lambda data: logger.info(f"[stderr]: {data.rstrip()}"),
+            timeout=3600,
         )
     except CommandExitException as e:
         logger.info("Error stdout: %s", e.stdout.strip())
         logger.info("Error stderr: %s", e.stderr.strip())
         raise e
 
+    qwenpaw_envs = {"LOONGSUITE_PYTHON_SITE_BOOTSTRAP": True} if args.enable_otel else {}
     try:
         result = sandbox.commands.run(
             "qwenpaw app &> /app/qwenpaw-app.log",
             background=True,
+            envs=qwenpaw_envs,
         )
         logger.info("qwenpaw app started with pid %d", result.pid)
     except CommandExitException as e:
