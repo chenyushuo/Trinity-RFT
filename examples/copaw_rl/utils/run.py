@@ -22,7 +22,6 @@ from typing import List
 import bench_client
 import requests
 import yaml
-from export_training_data import export_training_data
 from otel_init import init_otel, trace_span
 from setup_provider import (
     config_builtin_provider,
@@ -1257,6 +1256,8 @@ def main(args=None):  # noqa: C901
 
         if not args.evaluation:
             with trace_span("export_training_data", {"trajectories_length": len(trajectories)}):
+                from export_training_data import export_training_data
+
                 export_training_data(
                     args.task_id, trajectories, session_data=session_data, input_answer=input_answer
                 )
@@ -1452,21 +1453,6 @@ if __name__ == "__main__":
     args = parse_args()
     if args.enable_otel:
         init_otel(attributes={"task_id": args.task_id})
-
-        from openjudge.graders.base_grader import BaseGrader
-
-        if getattr(BaseGrader, "_is_patched", None) is None:
-            BaseGrader._is_patched = True
-
-            original_aevaluate = BaseGrader.aevaluate
-
-            async def new_aevaluate(self: BaseGrader, *args, **kwargs):
-                with trace_span(
-                    "aevaluate", {"grader": self.__class__.__name__, "name": self.name}
-                ):
-                    return await original_aevaluate(self, *args, **kwargs)
-
-            BaseGrader.aevaluate = new_aevaluate
 
     with trace_span("main"):
         main(args)

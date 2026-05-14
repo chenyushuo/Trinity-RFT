@@ -318,6 +318,24 @@ def run_workflow(
     envs = {}
     enable_otel = otel_config.pop("enable", False)
     if enable_otel:
+        logger.info("Restarting qwenpaw app with LOONGSUITE_PYTHON_SITE_BOOTSTRAP=True")
+        sandbox.commands.run("pkill -f '[q]wenpaw app' || true", timeout=30)
+        qwenpaw_envs = dict(envs)
+        qwenpaw_envs["LOONGSUITE_PYTHON_SITE_BOOTSTRAP"] = "True"
+        result = sandbox.commands.run(
+            "qwenpaw app |& tee /app/qwenpaw-app.log",
+            background=True,
+            envs=qwenpaw_envs,
+        )
+        for stdout, stderr, _ in result:
+            if stdout:
+                logger.debug(f"[qwenpaw app stdout]: {stdout.strip()}")
+                if "http://127.0.0.1:8088" in stdout:
+                    logger.info("qwenpaw app restarted with pid %d", result.pid)
+                    break
+            if stderr:
+                logger.debug(f"[qwenpaw app stderr]: {stderr.strip()}")
+        # 注入 OTEL 相关环境变量
         cmd += " --enable-otel"
         envs.update(_setup_otel_envs(otel_config))
     _, _ = launch_run_py(
@@ -560,7 +578,7 @@ if __name__ == "__main__":
     try:
         result = sandbox.commands.run(
             "pip uninstall qwenpaw -y && "
-            "pip install qwenpaw==v1.1.6 && "
+            "pip install qwenpaw==v1.1.7 && "
             "pip install oss2 pytest py-openjudge pytest-asyncio && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/model_trajectory.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_openai_model.py < /root/patch/openai_model.patch && "
@@ -571,6 +589,7 @@ if __name__ == "__main__":
             "echo '100.118.58.9    copaw-dataset.oss-cn-beijing-internal.aliyuncs.com' >> /etc/hosts && "
             "bash /root/setup_otel.sh && "
             "pip install --no-cache-dir 'wrapt<2' && "
+            "pip install opentelemetry-instrumentation-openai && "
             "qwenpaw init --defaults --accept-security",
             envs=otel_envs,
             on_stdout=lambda data: logger.info(f"[stdout]: {data.rstrip()}"),
@@ -582,12 +601,10 @@ if __name__ == "__main__":
         logger.info("Error stderr: %s", e.stderr.strip())
         raise e
 
-    qwenpaw_envs = {"LOONGSUITE_PYTHON_SITE_BOOTSTRAP": True} if args.enable_otel else {}
     try:
         result = sandbox.commands.run(
             "qwenpaw app &> /app/qwenpaw-app.log",
             background=True,
-            envs=qwenpaw_envs,
         )
         logger.info("qwenpaw app started with pid %d", result.pid)
     except CommandExitException as e:

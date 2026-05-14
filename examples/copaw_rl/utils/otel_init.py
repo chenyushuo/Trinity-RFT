@@ -28,6 +28,44 @@ _tracer = None  # opentelemetry.trace.Tracer | None
 _attributes = {}  # dict，记录全局属性（如 task_id）
 
 
+def apply_monkey_patch():
+    from openjudge.graders.base_grader import BaseGrader
+
+    if getattr(BaseGrader, "_is_patched", None) is None:
+        BaseGrader._is_patched = True
+
+        original_aevaluate = BaseGrader.aevaluate
+
+        async def new_aevaluate(self: BaseGrader, *args, **kwargs):
+            with trace_span("aevaluate", {"grader": self.__class__.__name__, "name": self.name}):
+                return await original_aevaluate(self, *args, **kwargs)
+
+        BaseGrader.aevaluate = new_aevaluate
+
+    import copaw_eval
+
+    trace_map = {
+        "_grading": ["_mr_extract_claims", "_mr_verify_chunk", "_mr_reduce_once"],
+    }
+
+    for module_name, func_names in trace_map.items():
+        module = getattr(copaw_eval, module_name)
+
+        if getattr(module, "_is_patched", None) is None:
+            module._is_patched = True
+
+            def wrap_async_function(func, span_name):
+                async def wrapper(*args, **kwargs):
+                    with trace_span(span_name):
+                        return await func(*args, **kwargs)
+
+                return wrapper
+
+            for func_name in func_names:
+                func = getattr(module, func_name)
+                setattr(module, func_name, wrap_async_function(func, func_name))
+
+
 def init_otel(
     service_name: str | None = None,
     endpoint: str | None = None,
@@ -57,6 +95,7 @@ def init_otel(
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
+        from opentelemetry.instrumentation.openai import OpenAIInstrumentor
         from opentelemetry.sdk.resources import (
             DEPLOYMENT_ENVIRONMENT,
             HOST_NAME,
@@ -90,10 +129,14 @@ def init_otel(
         trace_provider = TracerProvider(resource=resource, active_span_processor=span_processor)
         trace.set_tracer_provider(trace_provider)
 
+        OpenAIInstrumentor().instrument(tracer_provider=trace_provider)
+
         _otel_enabled = True
         if attributes:
             _attributes.update(attributes)
         log.info("OpenTelemetry 初始化成功，service=%s, endpoint=%s", svc, ep)
+
+        apply_monkey_patch()
         return True
 
     except ImportError as e:
