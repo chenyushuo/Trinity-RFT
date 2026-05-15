@@ -18,6 +18,7 @@ import functools
 import json
 import logging
 import os
+import random
 import re
 import statistics
 from typing import Any, Awaitable, Callable, Coroutine
@@ -294,6 +295,119 @@ _DEFAULT_GRADING_TRIALS = 3
 _HIGH_VARIANCE_RANGE_THRESHOLD = 2.0
 
 
+# 服务端打回后「重试也无用」的特征关键字（小写比对）。命中即直接放弃重试，
+# 把现状包成 GraderError 返回，免得拿 9 次（3 trials × 3 retries）打回值换同一个错。
+_NON_RETRYABLE_ERROR_PATTERNS: tuple[str, ...] = (
+    # dashscope 内容审核（输入 / 输出 风控均会以这串文案打回）
+    "data_inspection_failed",
+    "datainspectionfailed",
+    "inappropriate content",
+    # OpenAI / 兼容端点的内容策略
+    "content_policy_violation",
+    "content_filter",
+    # 上下文超长（输入超 model context window 不会因为重试变短）
+    "context_length_exceeded",
+    "maximum context length",
+    # 鉴权 / 权限 / 模型不可用 — 不会自愈
+    "invalid_api_key",
+    "incorrect_api_key",
+    "permission_denied",
+    "model_not_found",
+)
+
+
+def _is_non_retryable_error(payload: Any) -> bool:
+    """判断错误是否属于「重试也救不了」的类型。
+
+    覆盖：dashscope 内容审核 / OpenAI content policy / 上下文超长 / 鉴权类。
+    优先按异常类型判（``BadRequestError`` 几乎不可能因为再发一次就变好），
+    否则降级到字符串特征匹配。
+    """
+    if payload is None:
+        return False
+    if isinstance(payload, BaseException):
+        # OpenAI SDK 的 BadRequestError 是 status=400，绝大多数都是参数 / 内容相关，
+        # 重试无意义；但 408（Request Timeout）会被分到别处，这里只锁 400。
+        status = getattr(payload, "status_code", None)
+        if status == 400:
+            return True
+        text = f"{type(payload).__name__}: {payload}"
+    else:
+        text = str(payload)
+    text_lower = text.lower()
+    return any(p in text_lower for p in _NON_RETRYABLE_ERROR_PATTERNS)
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """从 OpenAI/HTTP 风格异常上读取 ``Retry-After`` 秒数（若可解析）。"""
+    candidates: list[Any] = []
+    for attr in ("retry_after", "retry_after_seconds"):
+        v = getattr(exc, attr, None)
+        if v is not None:
+            candidates.append(v)
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) if response is not None else None
+    if headers:
+        for key in ("Retry-After", "retry-after", "x-ratelimit-reset-requests"):
+            v = headers.get(key) if hasattr(headers, "get") else None
+            if v is not None:
+                candidates.append(v)
+    for v in candidates:
+        try:
+            secs = float(v)
+            if secs >= 0:
+                return secs
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _compute_retry_backoff(exc: Exception, attempt: int) -> float:
+    """按异常类别 + jitter 计算重试退避秒数。
+
+    - **RateLimitError / 429**：优先尊重 ``Retry-After``，否则 base=8s, cap=60s
+    - **超时 / 连接错误 / 5xx**：base=4s, cap=30s
+    - **其他**（解析失败 / Validation / KeyError 等）：基本不会因等待而自愈，
+      base=1s, cap=5s，把"重试一次以防偶发"这件事尽快做完
+
+    所有分支都用 ``2**attempt`` 增长 + 0~base 随机 jitter，避免多任务被同一波
+    限流打回后整齐再发触发 thundering herd。
+    """
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    is_rate_limit = (
+        "ratelimit" in name.lower()
+        or "429" in msg
+        or "rate limit" in msg
+        or "too many requests" in msg
+    )
+    is_transient = name in {
+        "APITimeoutError",
+        "APIConnectionError",
+        "ConnectionError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "Timeout",
+        "TimeoutError",
+        "InternalServerError",
+        "APIError",
+    } or any(code in msg for code in ("500", "502", "503", "504"))
+
+    if is_rate_limit:
+        retry_after = _retry_after_seconds(exc)
+        if retry_after is not None:
+            # 服务端明确告诉我们等多久，再加一点 jitter 错峰
+            return min(retry_after + random.uniform(0, 2.0), 60.0)
+        base, cap = 8.0, 60.0
+    elif is_transient:
+        base, cap = 4.0, 30.0
+    else:
+        # 解析/校验/KeyError 这类，等待无意义；只给极短退避，让重试快速吃完
+        base, cap = 1.0, 5.0
+
+    return min(base * (2**attempt) + random.uniform(0, base), cap)
+
+
 async def _trial_llm_grader(
     eval_fn: Callable[..., Coroutine[Any, Any, GraderScore | GraderError]],
     *,
@@ -318,12 +432,23 @@ async def _trial_llm_grader(
             results.append(result)
         else:
             last_error = result
+            err_msg = getattr(result, "error", result)
             logger.warning(
                 "Trial %d/%d returned GraderError: %s",
                 i + 1,
                 trials,
-                getattr(result, "error", result),
+                err_msg,
             )
+            # 同一 prompt 多 trial 跑同样的内容审核 / 上下文超长 / 鉴权类错误
+            # 只会换来一模一样的失败，提前终止，节省 wall-time + token quota。
+            if _is_non_retryable_error(err_msg):
+                logger.warning(
+                    "Trial %d/%d hit non-retryable error, skipping remaining %d trials",
+                    i + 1,
+                    trials,
+                    trials - (i + 1),
+                )
+                break
 
     if not results:
         return last_error  # type: ignore[return-value]
@@ -401,10 +526,21 @@ async def _run_grader_once(
         try:
             result = await grader.aevaluate(**eval_kwargs)
         except Exception as exc:
-            backoff = min(30 * (3**attempt), 300)
+            if _is_non_retryable_error(exc):
+                logger.warning(
+                    "%s grading hit non-retryable error %s: %s, skipping retries",
+                    label,
+                    type(exc).__name__,
+                    exc,
+                )
+                return GraderError(
+                    name=label,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            backoff = _compute_retry_backoff(exc, attempt)
             if attempt < max_retries:
                 logger.warning(
-                    "%s grading attempt %d/%d raised %s: %s, retrying in %ds...",
+                    "%s grading attempt %d/%d raised %s: %s, retrying in %.1fs...",
                     label,
                     attempt + 1,
                     max_retries + 1,
@@ -436,15 +572,27 @@ async def _run_grader_once(
                 )
             return result
         last_result = result
-        if attempt < max_retries:
+        err_msg = getattr(result, "error", "") or ""
+        if _is_non_retryable_error(err_msg):
             logger.warning(
-                "%s grading attempt %d/%d returned GraderError: %s, retrying...",
+                "%s grading returned non-retryable GraderError: %s, skipping retries",
+                label,
+                err_msg,
+            )
+            return result
+        if attempt < max_retries:
+            # GraderError 路径：LLM 已返回，结果只是格式不合规；等待并不会自愈，
+            # 给极短退避（带 jitter 错峰）即可，把重试预算尽快吃完。
+            backoff = min(1.0 * (2**attempt) + random.uniform(0, 1.0), 5.0)
+            logger.warning(
+                "%s grading attempt %d/%d returned GraderError: %s, retrying in %.1fs...",
                 label,
                 attempt + 1,
                 max_retries + 1,
-                getattr(result, "error", result),
+                err_msg or result,
+                backoff,
             )
-            await asyncio.sleep(5 * (3**attempt))
+            await asyncio.sleep(backoff)
 
     return last_result  # type: ignore[return-value]
 
@@ -455,7 +603,14 @@ async def _run_grader_once(
 
 
 async def _llm_raw_call(prompt: str, *, max_retries: int = 2, label: str = "") -> str:
-    """异步调用评测 LLM，返回纯文本。用于 MapReduce 的 Extract/Map/Reduce 阶段。"""
+    """异步调用评测 LLM，返回纯文本。用于 MapReduce 的 Extract/Map/Reduce 阶段。
+
+    与 ``get_llm_model()`` 走的 OpenJudge ``OpenAIChatModel`` 路径保持一致：
+    对 qwen / pai-judge 系列默认关闭 reasoning（``enable_thinking=False``），
+    避免每次 chunk verify 都先吐 1-3k reasoning token 拖慢 MapReduce 总耗时。
+    保留 ``<think>`` 兜底剥离，以防未来切到不支持 ``enable_thinking`` 的端点
+    或人为打开 reasoning 时回退仍能拿到干净文本。
+    """
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(
@@ -466,21 +621,35 @@ async def _llm_raw_call(prompt: str, *, max_retries: int = 2, label: str = "") -
         ),
     )
     model = os.environ.get("EVAL_LLM_MODEL", "qwen3.6-plus")
+    extra_body: dict[str, Any] = {}
+    if "qwen" in model.lower() or "pai-judge" in model.lower():
+        extra_body["enable_thinking"] = False
     for attempt in range(max_retries + 1):
         try:
-            resp = await client.chat.completions.create(
-                model=model,
-                temperature=0,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            create_kwargs: dict[str, Any] = {
+                "model": model,
+                "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if extra_body:
+                create_kwargs["extra_body"] = extra_body
+            resp = await client.chat.completions.create(**create_kwargs)
             text = resp.choices[0].message.content or ""
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
             return text
         except Exception as exc:
+            if _is_non_retryable_error(exc):
+                logger.error(
+                    "%s hit non-retryable error %s: %s, skipping retries",
+                    label,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise
             if attempt < max_retries:
-                backoff = min(10 * (3**attempt), 120)
+                backoff = _compute_retry_backoff(exc, attempt)
                 logger.warning(
-                    "%s attempt %d failed: %s, retry in %ds", label, attempt + 1, exc, backoff
+                    "%s attempt %d failed: %s, retry in %.1fs", label, attempt + 1, exc, backoff
                 )
                 await asyncio.sleep(backoff)
             else:
