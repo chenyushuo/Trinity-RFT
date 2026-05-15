@@ -333,21 +333,23 @@ def apply_monkey_patch(  # noqa: C901
             Qwen3_5MoeVisionModel,
         )
 
-        # Step 1: bug fix in transformers==5.2.0
-        # see https://github.com/huggingface/transformers/pull/44382
-        if "Qwen3_5TextDecoderLayer" in model._no_split_modules:
-            model._no_split_modules.remove("Qwen3_5TextDecoderLayer")
-            model.model._no_split_modules.remove("Qwen3_5TextDecoderLayer")
-        if "Qwen3_5MoeTextDecoderLayer" in model._no_split_modules:
-            model._no_split_modules.remove("Qwen3_5MoeTextDecoderLayer")
-            model.model._no_split_modules.remove("Qwen3_5MoeTextDecoderLayer")
+        from trinity.common.patch.qwen3_5 import (
+            decoder_layer_forward,
+            gate_delta_net_forward,
+            qwen35_model_forward,
+            qwen35_vision_fast_pos_embed_interpolate,
+        )
 
-        # see https://github.com/huggingface/transformers/pull/44399
-        if is_transformers_version_in_range(max_version="5.3.0"):
-            from trinity.common.patch.qwen3_5 import qwen35_text_forward
+        Qwen3_5DecoderLayer.forward = decoder_layer_forward
+        Qwen3_5MoeDecoderLayer.forward = decoder_layer_forward
+        Qwen3_5GatedDeltaNet.forward = gate_delta_net_forward
+        Qwen3_5MoeGatedDeltaNet.forward = gate_delta_net_forward
 
-            Qwen3_5TextModel.forward = qwen35_text_forward
-            Qwen3_5MoeTextModel.forward = qwen35_text_forward
+        Qwen3_5VisionModel.fast_pos_embed_interpolate = qwen35_vision_fast_pos_embed_interpolate
+        Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = qwen35_vision_fast_pos_embed_interpolate
+
+        Qwen3_5Model.forward = qwen35_model_forward
+        Qwen3_5MoeModel.forward = qwen35_model_forward
 
         from trinity.common.patch.qwen3_5 import (
             decoder_layer_forward,

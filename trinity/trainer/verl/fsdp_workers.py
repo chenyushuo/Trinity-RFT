@@ -16,6 +16,7 @@ The main entry point to run the PPO algorithm.
 Modified from https://github.com/volcengine/verl/blob/v0.7.1/verl/workers/fsdp_workers.py
 """
 
+import builtins
 import datetime
 import json
 import os
@@ -139,8 +140,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # setup logger
         self.logger = get_logger(f"{role}_{self.rank}", in_ray_actor=True)
-        import builtins
-
+        # redirect built-in print to logger to capture logs
         builtins.print = lambda *args, **kwargs: self.logger.info(" ".join(map(str, args)))
 
         # build device mesh for FSDP
@@ -405,13 +405,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.rank == 0:
             self.logger.info(f"Model config after override: {actor_model_config}")
 
+        major_capability, _ = torch.cuda.get_device_capability(0)
         use_meta = (
             (
                 self.rank != 0
                 if self.device_mesh is None
                 else self.device_mesh.get_coordinate()[-1] != 0
             )
-            if self.config.actor.strategy == "fsdp2"
+            if self.config.actor.strategy == "fsdp2" and major_capability >= 9
             else False
         )
 
@@ -814,13 +815,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                                     else name
                                 )
                                 self.state_dict_meta.append(
-                                    (realname, str(param.dtype), tuple(param.shape))
+                                    (realname, str(param.dtype).split(".")[-1], tuple(param.shape))
                                 )
                             param = None
                         torch.cuda.empty_cache()
                 else:  # fsdp2
                     for name, param in model.named_parameters():
-                        self.state_dict_meta.append((name, str(param.dtype), tuple(param.shape)))
+                        self.state_dict_meta.append(
+                            (name, str(param.dtype).split(".")[-1], tuple(param.shape))
+                        )
 
             if torch.distributed.get_rank() == 0:
                 import ray
@@ -848,6 +851,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     world_size=world_size,
                     rank=0,
                 )
+                self.logger.info("Trainer init_process_group done, wait for explorer confirmation.")
                 ray.get(setup_ref)
                 self.logger.info("Trainer explorer setup confirmation received.")
 
@@ -866,11 +870,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                                 )
                         param = None
             else:  # fsdp2
-                for name, param in self.actor_module_fsdp.named_parameters():
+                for _, param in self.actor_module_fsdp.named_parameters():
                     full_param = param.full_tensor().detach().to(device=get_device_id())
                     if torch.distributed.get_rank() == 0:
                         torch.distributed.broadcast(full_param, 0, group=self._model_update_group)
-                    del full_param
             if torch.distributed.get_rank() == 0:
                 torch.cuda.synchronize()
 
@@ -1224,8 +1227,7 @@ class CriticWorker(Worker, DistProfilerExtension):
 
         # Setup logger
         self.logger = get_logger(f"critic_{self.rank}", in_ray_actor=True)
-        import builtins
-
+        # redirect built-in print to logger to capture logs
         builtins.print = lambda *args, **kwargs: self.logger.info(" ".join(map(str, args)))
 
         self.config: FSDPCriticConfig = config

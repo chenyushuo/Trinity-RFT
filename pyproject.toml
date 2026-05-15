@@ -46,7 +46,7 @@ dependencies = [
     "nvidia-ml-py",
     "transformers>=5.8.0",
     "datasets>=4.0.0",
-    "typer>=0.20.1",
+    "typer>=0.20.2",
 ]
 
 [project.scripts]
@@ -54,7 +54,10 @@ trinity = "trinity.cli.launcher:main"
 
 [project.optional-dependencies]
 vllm = [
-    "vllm>=0.19.1,<=0.20.1",
+    "vllm>=0.19.1,<=0.20.2",
+]
+sglang = [
+    "sglang==0.5.11",
 ]
 sglang = [
     "sglang==0.5.11",
@@ -91,7 +94,7 @@ megatron = [
     # "megatron-bridge==0.3.1",
 ]
 tinker = [
-    "tinker>=0.10.0,<=0.16.1; python_version >= '3.11'",
+    "tinker>=0.18.1; python_version >= '3.11'",
 ]
 
 doc = [

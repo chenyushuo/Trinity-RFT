@@ -1,6 +1,8 @@
 import asyncio
 import os
 import unittest
+from copy import deepcopy
+from typing import cast
 
 import ray
 import torch
@@ -18,7 +20,7 @@ from tests.tools import (
 )
 from trinity.common.config import Config
 from trinity.common.constants import MODEL_PATH_ENV_VAR
-from trinity.common.models import create_explorer_models
+from trinity.common.models.allocator import Allocator
 from trinity.common.models.model import ModelWrapper
 from trinity.common.models.utils import (
     tokenize_and_mask_messages_default,
@@ -34,51 +36,73 @@ def print_debug(*args):
         print(*args)
 
 
-async def prepare_engines(engines, auxiliary_engines):
-    prepare_model_refs = []
-    for engine in engines:
-        prepare_model_refs.append(engine.prepare.remote())
-    for engines in auxiliary_engines:
-        for engine in engines:
-            prepare_model_refs.append(engine.prepare.remote())
-    await asyncio.gather(*prepare_model_refs)
+async def create_test_models(config: Config):
+    allocator = Allocator(config.explorer)
+    return await allocator.create_all_models()
+
+
+def clone_wrapper(wrapper: ModelWrapper, enable_history: bool) -> ModelWrapper:
+    config = deepcopy(wrapper.config)
+    config.enable_history = enable_history
+    return ModelWrapper(
+        models=cast(list, wrapper.models),
+        config=config,
+        api_address=wrapper.api_address,
+    )
+
+
+class VLLMTestBase(RayUnittestBaseAsync):
+    async def asyncTearDown(self):
+        wrappers = []
+        for attr in ("engines", "auxiliary_engines"):
+            value = getattr(self, attr, None)
+            if value is None:
+                continue
+            if attr == "engines":
+                wrappers.extend(value)
+            else:
+                for model_list in value:
+                    wrappers.extend(model_list)
+
+        if wrappers:
+            await asyncio.gather(*[wrapper.shutdown() for wrapper in wrappers])
 
 
 @parameterized_class(
     (
         "tensor_parallel_size",
         "engine_num",
+        "nnodes",
         "repeat_times",
         "enable_history",
         "use_async",
     ),
     [
-        (2, 2, 2, True, False),
-        (1, 2, 1, False, True),
-        (2, 1, 3, True, True),
+        (2, 2, 1, 1, True, False),
+        (1, 2, 1, 1, False, True),
+        (4, 1, 2, 4, True, True),
     ],
 )
-class ModelWrapperTest(RayUnittestBaseAsync):
-    def setUp(self):
+class ModelWrapperTest(VLLMTestBase):
+    async def asyncSetUp(self):
         # configure the model
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_model_path()
         self.config.model.custom_chat_template = CHAT_TEMPLATE
         self.config.explorer.rollout_model.engine_num = self.engine_num
+        self.config.explorer.rollout_model.nnodes = self.nnodes
         self.config.explorer.rollout_model.tensor_parallel_size = self.tensor_parallel_size
         self.config.algorithm.repeat_times = self.repeat_times
         self.config.explorer.rollout_model.enable_history = self.enable_history
         self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
         self.config.check_and_update()
 
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=self.enable_history)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
 
     async def test_generate(self):
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
-        self.assertEqual(self.model_wrapper.model_path, self.config.model.model_path)
+        self.assertEqual(self.model_wrapper.model_name, self.config.model.model_path)
         prompts = ["Hello, world!", "Hello, my name is"]
         n = self.config.algorithm.repeat_times
         if self.use_async:
@@ -176,8 +200,8 @@ class ModelWrapperTest(RayUnittestBaseAsync):
         (20, 5, 15),
     ],
 )
-class TestModelLen(RayUnittestBaseAsync):
-    def setUp(self):
+class TestModelLen(VLLMTestBase):
+    async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_model_path()
@@ -186,15 +210,14 @@ class TestModelLen(RayUnittestBaseAsync):
         self.config.model.max_response_tokens = self.max_response_tokens
         self.config.model.enable_prompt_truncation = True
         self.config.explorer.rollout_model.enable_openai_api = True
+        self.config.explorer.rollout_model.enable_history = True
         self.config.check_and_update()
 
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.model_path)
 
     async def test_model_len(self):
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "What's the weather like today?"},
@@ -257,9 +280,6 @@ class TestModelLen(RayUnittestBaseAsync):
 
         # test prompt truncation branch in generate
         if self.max_prompt_tokens == 5:
-            await prepare_engines(self.engines, self.auxiliary_engines)
-            await self.model_wrapper.prepare()
-
             prompt = "This is a deliberately long prompt for truncation coverage."
             prompt_token_ids = self.tokenizer(prompt, truncation=False, return_tensors="pt")[
                 "input_ids"
@@ -280,8 +300,8 @@ class TestModelLen(RayUnittestBaseAsync):
                 _check_experience(exp)
 
 
-class TestModelLenWithoutPromptTruncation(RayUnittestBaseAsync):
-    def setUp(self):
+class TestModelLenWithoutPromptTruncation(VLLMTestBase):
+    async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_model_path()
@@ -290,14 +310,13 @@ class TestModelLenWithoutPromptTruncation(RayUnittestBaseAsync):
         self.config.model.max_response_tokens = None
         self.config.model.enable_prompt_truncation = False
         self.config.explorer.rollout_model.enable_openai_api = True
+        self.config.explorer.rollout_model.enable_history = True
         self.config.check_and_update()
 
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
 
     async def test_model_len(self):
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
         messages = [
             {"role": "user", "content": "How are you?"},
         ]
@@ -329,8 +348,8 @@ class TestModelLenWithoutPromptTruncation(RayUnittestBaseAsync):
         )
 
 
-class TestMessageProcess(RayUnittestBaseAsync):
-    def setUp(self):
+class TestMessageProcess(VLLMTestBase):
+    async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_model_path()
@@ -340,14 +359,11 @@ class TestMessageProcess(RayUnittestBaseAsync):
         self.config.model.enable_prompt_truncation = True
         self.config.explorer.rollout_model.enable_openai_api = True
         self.config.check_and_update()
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
 
     async def test_truncation_status(self):
         """Test truncation status for multi-turn conversations."""
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
-
         # Case: "prompt_truncated"
         messages = [
             {"role": "system", "content": "You are helpful."},
@@ -374,8 +390,6 @@ class TestMessageProcess(RayUnittestBaseAsync):
         """Test truncation status for multi-turn conversations in workflow."""
         self.config.model.enable_prompt_truncation = False
         self.config.check_and_update()
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
 
         # Case: No truncation
         messages = [
@@ -403,8 +417,8 @@ class TestMessageProcess(RayUnittestBaseAsync):
         self.assertLessEqual(model_len, self.config.model.max_model_len)
 
 
-class TestAPIServer(RayUnittestBaseAsync):
-    def setUp(self):
+class TestAPIServer(VLLMTestBase):
+    async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_model_path()
@@ -415,16 +429,14 @@ class TestAPIServer(RayUnittestBaseAsync):
         self.config.explorer.rollout_model.enable_openai_api = True
         self.config.explorer.rollout_model.enable_auto_tool_choice = True
         self.config.explorer.rollout_model.tool_call_parser = "qwen3_coder"
+        self.config.explorer.rollout_model.enable_history = True
 
         self.config.check_and_update()
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
-        self.model_wrapper_no_history = ModelWrapper(self.engines[0], enable_history=False)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
+        self.model_wrapper_no_history = clone_wrapper(self.model_wrapper, enable_history=False)
 
     async def test_api(self):
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
-        await self.model_wrapper_no_history.prepare()
         openai_client = self.model_wrapper.get_openai_client()
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -505,9 +517,6 @@ class TestAPIServer(RayUnittestBaseAsync):
         "Qwen3.5" not in os.getenv(MODEL_PATH_ENV_VAR, ""), "This test is only for Qwen3.5 series"
     )
     async def test_reasoning_content(self):
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
-        await self.model_wrapper_no_history.prepare()
         openai_client = self.model_wrapper.get_openai_client()
         model_id = openai_client.models.list().data[0].id
         # test reasoning content
@@ -604,8 +613,8 @@ The maximum number of steps remaining is 10.
 """
 
 
-class TestLogprobs(RayUnittestBaseAsync):
-    def setUp(self):
+class TestLogprobs(VLLMTestBase):
+    async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_model_path()
@@ -614,15 +623,14 @@ class TestLogprobs(RayUnittestBaseAsync):
         self.config.explorer.rollout_model.tensor_parallel_size = 1
         self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
         self.config.explorer.rollout_model.enable_openai_api = True
+        self.config.explorer.rollout_model.enable_history = True
         self.config.explorer.rollout_model.enable_log_requests = True
 
         self.config.check_and_update()
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
 
     async def test_logprobs_api(self):
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_PROMPT},
@@ -791,7 +799,7 @@ class TestLogprobs(RayUnittestBaseAsync):
         )
 
 
-class TestAsyncAPIServer(RayUnittestBaseAsync):
+class TestAsyncAPIServer(VLLMTestBase):
     engine_type: str = "vllm"
     model_path: str = get_model_path()
 
@@ -808,18 +816,16 @@ class TestAsyncAPIServer(RayUnittestBaseAsync):
         self.config.explorer.rollout_model.tensor_parallel_size = 1
         self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
         self.config.explorer.rollout_model.enable_openai_api = True
+        self.config.explorer.rollout_model.enable_history = True
 
         self.config.check_and_update()
 
     async def _setup_engines(self):
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
-        self.model_wrapper_no_history = ModelWrapper(self.engines[0], enable_history=False)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
+        self.model_wrapper_no_history = clone_wrapper(self.model_wrapper, enable_history=False)
 
     async def test_api_async(self):
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
-        await self.model_wrapper_no_history.prepare()
         openai_client = self.model_wrapper.get_openai_async_client()
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -1046,8 +1052,8 @@ class TestTokenizer(unittest.TestCase):
         (False, None),
     ],
 )
-class TestAPIServerToolCall(RayUnittestBaseAsync):
-    def setUp(self):
+class TestAPIServerToolCall(VLLMTestBase):
+    async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_api_model_path()
@@ -1056,6 +1062,7 @@ class TestAPIServerToolCall(RayUnittestBaseAsync):
         self.config.explorer.rollout_model.tensor_parallel_size = 1
         self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
         self.config.explorer.rollout_model.enable_openai_api = True
+        self.config.explorer.rollout_model.enable_history = True
         # added for toolcalls
         self.config.explorer.rollout_model.enable_auto_tool_choice = True
         self.config.explorer.rollout_model.tool_call_parser = "hermes"
@@ -1063,9 +1070,9 @@ class TestAPIServerToolCall(RayUnittestBaseAsync):
         self.config.explorer.rollout_model.reasoning_parser = self.reasoning_parser
 
         self.config.check_and_update()
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
-        self.model_wrapper_no_history = ModelWrapper(self.engines[0], enable_history=False)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
+        self.model_wrapper_no_history = clone_wrapper(self.model_wrapper, enable_history=False)
 
     async def test_api_tool_calls(self):
         """Tests the full conversation flow of a tool call via the OpenAI API.
@@ -1074,9 +1081,6 @@ class TestAPIServerToolCall(RayUnittestBaseAsync):
         import json
         import time
 
-        await prepare_engines(self.engines, self.auxiliary_engines)
-        await self.model_wrapper.prepare()
-        await self.model_wrapper_no_history.prepare()
         tokenizer = AutoTokenizer.from_pretrained(get_api_model_path())
         print_debug("\n\n" + "=" * 30 + " Running test_api_tool_calls " + "=" * 30)
         start_time = time.time()
@@ -1325,8 +1329,8 @@ class TestAPIServerToolCall(RayUnittestBaseAsync):
         )
 
 
-class TestSuperLongGeneration(RayUnittestBaseAsync):
-    def setUp(self):
+class TestSuperLongGeneration(VLLMTestBase):
+    async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_model_path()
@@ -1344,8 +1348,8 @@ class TestSuperLongGeneration(RayUnittestBaseAsync):
         self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
 
         self.config.check_and_update()
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
 
     async def test_generate(self):
         base_dir = os.path.dirname(__file__)
@@ -1381,10 +1385,10 @@ class TestSuperLongGeneration(RayUnittestBaseAsync):
         self.assertGreater(response.logprobs.shape[0], 1000)
 
 
-class TestTinkerAPI(RayUnittestBaseAsync):
+class TestTinkerAPI(VLLMTestBase):
     """Test the Tinker API integration with the vLLM engine."""
 
-    def setUp(self):
+    async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
         self.config.model.model_path = get_model_path()
@@ -1396,14 +1400,14 @@ class TestTinkerAPI(RayUnittestBaseAsync):
         self.config.explorer.rollout_model.enable_lora = True
 
         self.config.check_and_update()
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
 
     async def test_tinker_api(self):
         from tinker import types
         from transformers import AutoTokenizer
 
-        engine = self.engines[0]
+        engine = self.model_wrapper.model
         tokenizer = AutoTokenizer.from_pretrained(self.config.model.model_path)
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},

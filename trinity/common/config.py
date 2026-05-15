@@ -562,6 +562,7 @@ class InferenceModelConfig:
     enable_openai_api: bool = False
     enable_log_requests: bool = False  # whether to enable request logging in vLLM API server
     base_port: Optional[int] = None
+    api_key: str = "EMPTY"
 
     # For tool calls in OpenAI API
     enable_auto_tool_choice: bool = False
@@ -572,6 +573,11 @@ class InferenceModelConfig:
 
     # For external API-based engine
     external_model_config: ExternalModelConfig = field(default_factory=ExternalModelConfig)
+
+    # for multi-node setup
+    nnodes: int = 1
+    # ! DO NOT SET
+    node_rank: int = 0
 
     # ! DO NOT SET
     bundle_indices: str = ""

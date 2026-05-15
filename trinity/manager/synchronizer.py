@@ -291,7 +291,9 @@ class Synchronizer:
                 )
         update_weight_args_list = []
         for name, param in self.model_state_dict.items():
-            update_weight_args_list.append((name, str(param.dtype), tuple(param.shape)))
+            update_weight_args_list.append(
+                (name, str(param.dtype).split(".")[-1], tuple(param.shape))
+            )
         return update_weight_args_list
 
     async def setup_weight_sync_group(
@@ -357,14 +359,19 @@ class Synchronizer:
         async with self._ready_condition:
             return self.model_version
 
-    async def get_latest_model_path(self) -> Optional[str]:
+    async def get_latest_model_path(self, use_huggingface: bool = False) -> Optional[str]:
         """
         Get the latest model path available in the synchronizer.
+
+        Args:
+            use_huggingface: Whether to return the Hugging Face model path.
 
         Returns:
             The current model path.
         """
         async with self._ready_condition:
+            if self.model_path and use_huggingface:
+                return os.path.join(self.model_path, "huggingface")
             return self.model_path
 
     async def ready_to_nccl_sync(self, module: str, trainer_step: int) -> Union[int, None]:

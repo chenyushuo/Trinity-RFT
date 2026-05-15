@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """The Workflow Runner Module."""
+
 import asyncio
 import os
 import time
@@ -12,8 +13,8 @@ from trinity.buffer import get_buffer_reader, get_buffer_writer
 from trinity.common.config import Config, StorageConfig
 from trinity.common.constants import LOG_DIR_ENV_VAR, LOG_LEVEL_ENV_VAR
 from trinity.common.experience import Experience
-from trinity.common.models import get_debug_explorer_model
-from trinity.common.models.model import InferenceModel, ModelWrapper
+from trinity.common.models.allocator import Allocator
+from trinity.common.models.model import ModelWrapper
 from trinity.common.workflows import Task, Workflow
 from trinity.utils.log import get_logger
 
@@ -66,27 +67,22 @@ class WorkflowRunner:
     def __init__(
         self,
         config: Config,
-        model: InferenceModel,
-        auxiliary_models: Optional[List[InferenceModel]] = None,
+        rollout_model_id: int,
+        auxiliary_model_ids: Optional[List[int]] = None,
         runner_id: Optional[int] = None,
     ) -> None:
         self.name = f"{config.explorer.name}_runner_{runner_id}"
         self.logger = get_logger(self.name, in_ray_actor=True)
         self.config = config
-        self.model = model
-        self.model_wrapper = ModelWrapper(
-            model,
-            enable_lora=config.explorer.rollout_model.enable_lora,
-            enable_history=config.explorer.rollout_model.enable_history,
+        allocator = Allocator(config.explorer)
+        self.model_wrapper: ModelWrapper = allocator.get_model(
+            config.explorer.rollout_model, "rollout", rollout_model_id
         )
-        self.auxiliary_models = auxiliary_models or []
-        self.auxiliary_model_wrappers = [
-            ModelWrapper(
-                model,
+        self.auxiliary_model_wrappers: List[ModelWrapper] = [
+            allocator.get_model(
+                config.explorer.auxiliary_models[index], f"auxiliary_{index}", auxiliary_model_id
             )
-            for model, aux_model_config in zip(
-                self.auxiliary_models, config.explorer.auxiliary_models
-            )
+            for index, auxiliary_model_id in enumerate(auxiliary_model_ids or [])
         ]
         self.workflow_instance: Workflow = None
         self.runner_id = runner_id
@@ -151,9 +147,11 @@ class WorkflowRunner:
 
     def _create_isolated_workflow_instance(self, task: Task) -> Workflow:
         return task.to_workflow(
-            self.model_wrapper.clone_with_isolated_history()
-            if self.config.explorer.rollout_model.enable_history
-            else self.model_wrapper,
+            (
+                self.model_wrapper.clone_with_isolated_history()
+                if self.config.explorer.rollout_model.enable_history
+                else self.model_wrapper
+            ),
             self.auxiliary_model_wrappers,
         )
 
@@ -465,7 +463,6 @@ class DebugWorkflowRunner(WorkflowRunner):
         enable_profiling: bool = False,
         disable_overwrite: bool = False,
     ) -> None:
-        model, auxiliary_models = get_debug_explorer_model(config)
         if disable_overwrite:
             # if output dir is not empty, change to a new dir with datetime suffix
             if os.path.isdir(output_dir) and os.listdir(output_dir):
@@ -473,7 +470,12 @@ class DebugWorkflowRunner(WorkflowRunner):
                 output_dir = f"{output_dir}_{suffix}"
         os.environ[LOG_DIR_ENV_VAR] = os.path.join(output_dir, "log")
         os.environ[LOG_LEVEL_ENV_VAR] = "DEBUG"
-        super().__init__(config, model, auxiliary_models, 0)
+        super().__init__(
+            config=config,
+            rollout_model_id=0,
+            auxiliary_model_ids=[0] * len(config.explorer.auxiliary_models),
+            runner_id=0,
+        )
         self.taskset = get_buffer_reader(config.buffer.explorer_input.tasksets[0])
         self.output_dir = output_dir
         self.enable_profiling = enable_profiling
@@ -498,16 +500,8 @@ class DebugWorkflowRunner(WorkflowRunner):
             )
         )
 
-    async def prepare(self) -> None:
-        # make sure models are started
-        prepare_refs = [self.model.prepare.remote()]
-        prepare_refs.extend(model.prepare.remote() for model in self.auxiliary_models)
-        await asyncio.gather(*prepare_refs)
-        await super().prepare()
-
     async def debug(self) -> None:
         """Run the debug workflow."""
-        await self.prepare()
         tasks = await self.taskset.read_async(batch_size=1)
         task = tasks[0]
         self.logger.info(f"Start debugging task:\n{task.raw_task}")

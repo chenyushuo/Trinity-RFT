@@ -76,10 +76,10 @@ class BaseTrainerCase(RayUnittestBase):
 
 
 @parameterized_class(
-    ("strategy",),
+    ("strategy", "engine_type"),
     [
-        ("fsdp2",),
-        ("megatron",),
+        ("fsdp2", "sglang"),
+        ("megatron", "vllm"),
     ],
 )
 class TestTrainerCountdown(BaseTrainerCase):
@@ -92,6 +92,7 @@ class TestTrainerCountdown(BaseTrainerCase):
             "original_max_position_embeddings": 16384,
         }
         self.config.model.rope_theta = 10000
+        self.config.explorer.rollout_model.engine_type = self.engine_type
         self.config.buffer.explorer_input.taskset = get_unittest_dataset_config("countdown")
         self.config.buffer.explorer_input.taskset.data_selector = DataSelectorConfig(
             selector_type="shuffle", seed=42
@@ -239,12 +240,11 @@ class TestStepAheadAsyncRL(BaseTrainerCase):
 
 
 @parameterized_class(
-    ("fsdp_strategy", "offloading"),
+    ("fsdp_strategy", "offloading", "engine_type"),
     [
-        ("fsdp", False),
-        ("fsdp2", False),
-        ("fsdp", True),
-        ("fsdp2", True),
+        ("fsdp", False, "vllm"),
+        ("fsdp2", False, "vllm"),
+        ("fsdp2", True, "sglang"),
     ],
 )
 class TestTrainerGSM8K(BaseTrainerCase):
@@ -259,6 +259,12 @@ class TestTrainerGSM8K(BaseTrainerCase):
         }
         # self.config.algorithm.repeat_times = 8  # TODO: used for real testing
         # self.config.buffer.batch_size = 96  # TODO: used for real testing
+        # FOR MULTI-NODE TESTING, PLEASE MAKE SURE YOU HAVE 3 NODES
+        # self.config.explorer.rollout_model.nnodes = 2
+        # self.config.explorer.rollout_model.engine_num = 1
+        # self.config.explorer.rollout_model.tensor_parallel_size = 4
+        # self.config.cluster.node_num = 3
+        self.config.explorer.rollout_model.engine_type = self.engine_type
         self.config.buffer.total_epochs = 1
         self.config.buffer.explorer_input.taskset = get_unittest_dataset_config("gsm8k")
         self.config.trainer.trainer_strategy = self.fsdp_strategy

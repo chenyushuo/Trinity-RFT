@@ -27,7 +27,7 @@ from tests.tools import (
 from trinity.common.config import InferenceModelConfig
 from trinity.common.constants import LOG_DIR_ENV_VAR, LOG_LEVEL_ENV_VAR
 from trinity.common.experience import EID, Experience
-from trinity.common.models import create_explorer_models
+from trinity.common.models.allocator import Allocator
 from trinity.common.models.model import ModelWrapper
 from trinity.common.workflows import WORKFLOWS, Workflow
 from trinity.common.workflows.customized_math_workflows import MathBoxedWorkflow
@@ -40,6 +40,13 @@ def deserialize_experiences(exp_payload: bytes) -> list[Experience]:
     if not exp_payload:
         return []
     return Experience.deserialize_many(exp_payload)
+
+
+def patch_runner_models(*wrappers):
+    return mock.patch(
+        "trinity.explorer.workflow_runner.Allocator.get_model",
+        side_effect=list(wrappers),
+    )
 
 
 @dataclass
@@ -461,7 +468,7 @@ class WorkflowTest(unittest.TestCase):
     ],
 )
 class MultiTurnWorkflowTest(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
         # configure the model
         self.config = get_template_config()
         self.config.mode = "explore"
@@ -472,11 +479,12 @@ class MultiTurnWorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.config.algorithm.repeat_times = 2  # self.repeat_times
         self.config.explorer.rollout_model.enable_history = True  # self.enable_history
         self.config.check_and_update()
-        self.engines, self.auxiliary_engines = create_explorer_models(self.config)
-        self.model_wrapper = ModelWrapper(self.engines[0], enable_history=True)
+        allocator = Allocator(self.config.explorer)
+        rollout_model, _ = await allocator.create_all_models()
+        self.model_wrapper = rollout_model[0]
+        await self.model_wrapper.prepare()
 
     async def test_multi_turn_workflow(self):
-        await asyncio.gather(*[engine.prepare.remote() for engine in self.engines])
         task = Task(
             workflow=self.workflow_cls,
             repeat_times=3,
@@ -512,7 +520,7 @@ class StateRecordingWorkflow(Workflow):
 class TestWorkflowStateRecording(unittest.IsolatedAsyncioTestCase):
     async def test_workflow_state_recording(self):
         model = MagicMock()
-        model_wrapper = ModelWrapper(model)
+        model_wrapper = ModelWrapper(model, config=InferenceModelConfig(model_path="dummy_model"))
 
         task = Task(
             workflow=StateRecordingWorkflow,
@@ -596,7 +604,7 @@ class DummyModelWrapper:
         pass
 
     async def prepare(self):
-        return None
+        return
 
     def get_openai_client(self):
         return openai.OpenAI(api_key="EMPTY")
@@ -674,19 +682,23 @@ class PartialFailureWorkflow(Workflow):
 class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
     async def test_workflow_runner(self):
         config = get_template_config()
+        config.explorer.auxiliary_models = [
+            config.explorer.rollout_model,
+            config.explorer.rollout_model,
+        ]
 
-        with mock.patch(
-            "trinity.explorer.workflow_runner.ModelWrapper",
-            DummyModelWrapper,
+        with patch_runner_models(
+            DummyModelWrapper(MagicMock()),
+            DummyModelWrapper(MagicMock()),
+            DummyModelWrapper(MagicMock()),
         ):
             runner = WorkflowRunner(
                 config,
-                model=MagicMock(),
-                auxiliary_models=[MagicMock(), MagicMock()],
+                rollout_model_id=0,
+                auxiliary_model_ids=[0, 1],
                 runner_id=0,
             )
             await runner.prepare()
-
             task = Task(
                 workflow=DummyWorkflow,
                 repeat_times=3,
@@ -731,18 +743,13 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
         config = get_template_config()
         config.explorer.concurrent_mode = concurrent_mode
 
-        with mock.patch(
-            "trinity.explorer.workflow_runner.ModelWrapper",
-            DummyModelWrapper,
-        ):
+        with patch_runner_models(DummyModelWrapper(MagicMock())):
             runner = WorkflowRunner(
                 config,
-                model=MagicMock(),
-                auxiliary_models=[],
+                rollout_model_id=0,
                 runner_id=0,
             )
             await runner.prepare()
-
             PartialFailureWorkflow.reset_call_count()
             task = Task(
                 workflow=PartialFailureWorkflow,
@@ -787,23 +794,18 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
         config = get_template_config()
         config.explorer.concurrent_mode = concurrent_mode
 
-        with mock.patch(
-            "trinity.explorer.workflow_runner.ModelWrapper",
-            DummyModelWrapper,
-        ):
+        with patch_runner_models(DummyModelWrapper(MagicMock())):
             runner = WorkflowRunner(
                 config,
-                model=MagicMock(),
-                auxiliary_models=[],
+                rollout_model_id=0,
                 runner_id=0,
             )
-            await runner.prepare()
-
             task = Task(
                 workflow=PartialFailureWorkflow,
                 repeat_times=3,
                 raw_task={"fail_call_ids": []},
             )
+            await runner.prepare()
 
             async def mock_execute_single_run(
                 workflow: Workflow,
@@ -868,14 +870,15 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
         model.get_api_key.remote = MagicMock(side_effect=mock_get_api_key_remote)
         model.get_model_config.remote = MagicMock(side_effect=mock_get_model_config_remote)
 
-        runner = WorkflowRunner(
-            config,
-            model=model,
-            auxiliary_models=[],
-            runner_id=1,
-        )
-        await runner.prepare()
-
+        with patch_runner_models(
+            ModelWrapper(model, config=InferenceModelConfig(model_path="dummy_model"))
+        ):
+            runner = WorkflowRunner(
+                config,
+                rollout_model_id=0,
+                runner_id=1,
+            )
+            await runner.prepare()
         task = Task(
             workflow=StateRecordingWorkflow,
             raw_task={},
@@ -913,12 +916,11 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
         config.explorer.rollout_model.enable_openai_api = True
         config.explorer.rollout_model.enable_history = True
         config.check_and_update()
-        engines, auxiliary_engines = create_explorer_models(config)
-        await asyncio.gather(*[engine.prepare.remote() for engine in engines])
+        allocator = Allocator(config.explorer)
+        rollout_model, auxiliary_models = await allocator.create_all_models()
         runner = WorkflowRunner(
             config,
-            model=engines[0],
-            auxiliary_models=[],
+            rollout_model_id=0,
             runner_id=0,
         )
         await runner.prepare()
@@ -951,6 +953,8 @@ class TestWorkflowRunner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(exps), 2)
         exps = runner.model_wrapper.extract_experience_from_history(clear_history=False)
         self.assertEqual(len(exps), 0)
+        self.assertEqual(len(rollout_model), 1)
+        await rollout_model[0].shutdown()
 
     def tearDown(self):
         ray.shutdown(_exiting_interpreter=True)
@@ -998,8 +1002,8 @@ class TestConcurrentWorkflowRunner(RayUnittestBaseAsync):
         os.makedirs(self.config.log.save_dir, exist_ok=True)
 
     async def test_concurrent_workflow_runner(self):
-        engines, auxiliary_engines = create_explorer_models(self.config)
-        await asyncio.gather(*[engine.prepare.remote() for engine in engines])
+        allocator = Allocator(self.config.explorer)
+        rollout_model, _ = await allocator.create_all_models()
 
         self.config.explorer.concurrent_mode = "sequential"
         sequential_runner = (
@@ -1014,8 +1018,7 @@ class TestConcurrentWorkflowRunner(RayUnittestBaseAsync):
             )
             .remote(
                 self.config,
-                model=engines[0],
-                auxiliary_models=[],
+                rollout_model_id=0,
                 runner_id=0,
             )
         )
@@ -1032,8 +1035,7 @@ class TestConcurrentWorkflowRunner(RayUnittestBaseAsync):
             )
             .remote(
                 self.config,
-                model=engines[0],
-                auxiliary_models=[],
+                rollout_model_id=0,
                 runner_id=1,
             )
         )
@@ -1049,8 +1051,7 @@ class TestConcurrentWorkflowRunner(RayUnittestBaseAsync):
             )
             .remote(
                 self.config,
-                model=engines[0],
-                auxiliary_models=[],
+                rollout_model_id=0,
                 runner_id=2,
             )
         )
@@ -1059,7 +1060,6 @@ class TestConcurrentWorkflowRunner(RayUnittestBaseAsync):
             async_runner.prepare.remote(),
             thread_runner.prepare.remote(),
         )
-
         task = Task(
             workflow=ConcurrentTestWorkflow,
             repeat_times=4,
@@ -1140,6 +1140,7 @@ class TestConcurrentWorkflowRunner(RayUnittestBaseAsync):
             assert "[WARNING MESSAGE]" in thread_logs
             warning_count = thread_logs.count("[WARNING MESSAGE]")
             assert warning_count == 5
+        await rollout_model[0].shutdown()
 
     def tearDown(self):
         shutil.rmtree(self.config.log.save_dir, ignore_errors=True)

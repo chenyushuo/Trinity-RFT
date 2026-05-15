@@ -362,7 +362,7 @@ class TestPullLatestWeights(unittest.IsolatedAsyncioTestCase):
             return_value=new_version,
         )
         for m in self.explorer.models:
-            m.sync_model.remote = AsyncMock()
+            m.sync_model_weights = AsyncMock()
 
     @parameterized.expand(
         [
@@ -383,13 +383,13 @@ class TestPullLatestWeights(unittest.IsolatedAsyncioTestCase):
 
         for m in self.explorer.models:
             if expect_sync:
-                m.sync_model.remote.assert_called_once_with(
+                m.sync_model_weights.assert_called_once_with(
                     new_version,
                     self.explorer.config.synchronizer.sync_method,
                     timeout=self.explorer.config.synchronizer.sync_timeout,
                 )
             else:
-                m.sync_model.remote.assert_not_called()
+                m.sync_model_weights.assert_not_called()
 
     async def test_no_new_version_logs_warning(self):
         self._setup_versions(model_version=3, new_version=3)

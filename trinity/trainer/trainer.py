@@ -72,6 +72,7 @@ class Trainer:
         await self.engine.prepare()
         self.last_sync_step = self.train_step_num
         await self.synchronizer.set_trainer_status.remote(RunningStatus.RUNNING)
+        self.logger.info("Trainer is ready.")
 
     async def train(self) -> str:
         """Train the model with one-step-ahead data prefetch."""

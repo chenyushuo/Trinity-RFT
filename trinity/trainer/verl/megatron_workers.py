@@ -752,7 +752,9 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             if self._is_offload_param:
                 load_megatron_model_to_gpu(self.actor_module)
             for name, weight in self._get_tensor_generator():
-                self.state_dict_meta.append((name, str(weight.dtype), tuple(weight.shape)))
+                self.state_dict_meta.append(
+                    (name, str(weight.dtype).split(".")[-1], tuple(weight.shape))
+                )
                 del weight
             if self._is_offload_param:
                 offload_megatron_model_to_cpu(self.actor_module)

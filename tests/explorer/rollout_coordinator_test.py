@@ -140,12 +140,12 @@ def _build_status(metric_value):
 class CoordinatorHarness(RolloutCoordinator):
     """Coordinator subclass that injects fake owned dependencies."""
 
-    def __init__(self, config, rollout_model, auxiliary_models=None, *, pipeline, scheduler):
+    def __init__(self, config, *, pipeline, scheduler):
         """Store doubles and delegate the main initialization to the parent."""
 
         self._test_pipeline = pipeline
         self._test_scheduler = scheduler
-        super().__init__(config, rollout_model, auxiliary_models)
+        super().__init__(config)
 
     async def _init_experience_pipeline(self):
         """Return the injected fake pipeline."""
@@ -169,7 +169,6 @@ class TestRolloutCoordinator(unittest.IsolatedAsyncioTestCase):
         self.pipeline = FakePipeline()
         self.coordinator = CoordinatorHarness(
             _build_config(),
-            rollout_model=[],
             pipeline=self.pipeline,
             scheduler=self.scheduler,
         )

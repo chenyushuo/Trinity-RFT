@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Un
 import httpx
 import ray
 import torch
+from ray.actor import ActorHandle
 from torch import Tensor
 
 from trinity.common.config import InferenceModelConfig
@@ -29,6 +30,9 @@ class InferenceModel(ABC):
     def __init__(self, config: InferenceModelConfig) -> None:
         self.config = config
         self.logger = get_logger(__name__)
+        self._prepared = False
+        self.master_addr: Optional[str] = None
+        self.master_port: Optional[int] = None
 
     async def generate(self, prompt: str, **kwargs) -> Sequence[Experience]:
         """Generate a responses from a prompt in async."""
@@ -55,8 +59,27 @@ class InferenceModel(ABC):
         """Prepare the model before inference."""
         pass
 
+    async def ready(self) -> bool:
+        """Check if the model is ready for inference."""
+        return self._prepared
+
+    async def init_process_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str,
+        explorer_name: str,
+        backend: str = "nccl",
+        timeout: int = 1200,
+        state_dict_meta: Optional[List] = None,
+    ):
+        """Initialize the process group for model weight synchronization."""
+        pass
+
     @abstractmethod
-    async def sync_model(
+    async def sync_model_weights(
         self, model_version: int, method: SyncMethod, timeout: float = 1200
     ) -> int:
         """Sync the model with the latest model_version."""
@@ -65,17 +88,16 @@ class InferenceModel(ABC):
     def get_model_version(self) -> int:
         """Get the checkpoint version."""
 
-    def get_available_address(
-        self, min_port: int = 25000, max_port: int = 25020
-    ) -> Tuple[str, int]:
-        """Get the address of the actor."""
-        # TODO: workaround for ray.util.get_node_ip_address() in DLC
-        # address = ray.util.get_node_ip_address()
-        import subprocess
+    def get_available_address(self, random_port: bool = False) -> Tuple[str, int]:
+        """Get an available address on the current actor node.
 
-        address = subprocess.getoutput("hostname -I").strip().split()[0]
-        if self.config.base_port is not None:
-            configured_port = self.config.base_port + (self.config.engine_id % 8)
+        Args:
+            random_port: Whether to skip the configured ``base_port`` convention and
+                allocate an ephemeral port on the current node directly.
+        """
+        address = ray.util.get_node_ip_address()
+        if not random_port and self.config.base_port is not None:
+            configured_port = self.config.base_port + self.config.engine_id
             with socket.socket() as s:
                 try:
                     s.bind(("", configured_port))
@@ -86,20 +108,15 @@ class InferenceModel(ABC):
                         configured_port,
                         self.config.engine_id,
                     )
+        with socket.socket() as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+        return address, port
 
-        if not (1 <= min_port <= max_port <= 65535):
-            raise ValueError(f"Invalid port range: {min_port}-{max_port}")
-        ports = list(range(min_port, max_port + 1))
-        random.shuffle(ports)
-        for port in ports:
-            with socket.socket() as s:
-                try:
-                    s.bind(("", port))
-                    return address, port
-                except OSError:
-                    continue
-
-        raise RuntimeError(f"No available port in range {min_port}-{max_port}")
+    def set_master_addr_port(self, master_addr: str, master_port: int):
+        """For multi node setup, set the master address and port for distributed communication."""
+        self.master_addr = master_addr
+        self.master_port = master_port
 
     def get_api_server_url(self) -> Optional[str]:
         """Get the API server URL if available."""
@@ -283,40 +300,36 @@ class ModelWrapper:
 
     def __init__(
         self,
-        model: InferenceModel,
-        enable_lora: bool = False,
-        enable_history: bool = False,
+        model: Optional[ActorHandle[InferenceModel]] = None,
+        models: Optional[List[ActorHandle[InferenceModel]]] = None,
+        config: Optional[InferenceModelConfig] = None,
+        api_address: Optional[str] = None,
     ):
         """Initialize the ModelWrapper.
 
         Args:
             model (InferenceModel): The inference model Ray actor.
-            enable_lora (bool): Whether to enable LoRA. Default to False.
-            enable_history (bool): Whether to enable history recording. Default to False.
+            models (List[InferenceModel]): A list of inference model Ray actors for ensemble. The first model will be used as the main model for generation and other models will be used for auxiliary purposes such as logprobs calculation. If `model` is provided, `models` will be ignored.
+            config (InferenceModelConfig): The configuration for the inference model.
+            api_address (str, optional): The API address for the model. Required if `enable_openai_api` is True in the config.
         """
-        self.model = model
-        self.config: InferenceModelConfig = None  # init during prepare
-        self._model_name: str = None
-        self.api_address: str = None
-        # TODO: pass the env var name instead of the key directly
-        self._api_key: str = None
-        self.openai_client: openai.OpenAI = None
-        self.openai_async_client: openai.AsyncOpenAI = None
-        self.logger = get_logger(__name__)
-        self.enable_lora = enable_lora
-        self.enable_history = enable_history
-        self.history = []
-        self.status = RunningStatus.RUNNING
-        self.workflow_state: Dict = {}
-        self.request_count = 0
-        self.state_lock = asyncio.Lock()
-
-    async def prepare(self) -> None:
-        """Prepare the model wrapper."""
-        self.config = await self.model.get_model_config.remote()
-        self._model_name = self.config.name
-        self._api_key = await self.model.get_api_key.remote()
-        self._engine_type = self.config.engine_type
+        if config is None:
+            raise ValueError("Model config must be provided.")
+        if model is None and models is None and config.engine_type != "external":
+            raise ValueError("Either model or models must be provided.")
+        if model is not None:
+            self.model = model
+            self.models = [model]
+        elif models is not None and len(models) > 0:
+            self.model = models[0]
+            self.models = models
+        else:
+            self.model = None
+            self.models = []
+        self.config: InferenceModelConfig = config
+        if self.config.model_path is None:
+            raise ValueError("model_path must be provided in the config.")
+        self._engine_type = config.engine_type
         self._generate_kwargs = {
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
@@ -326,11 +339,33 @@ class ModelWrapper:
             self._generate_kwargs["extra_body"] = {
                 "chat_template_kwargs": {"enable_thinking": self.config.enable_thinking}
             }
-        self.api_address = await self.model.get_api_server_url.remote()
-        if self.api_address is None:
-            self.logger.info("API server is not enabled for inference model.")
+        self.api_address: Optional[str] = api_address
+        self._api_key: str = self.config.api_key
+        self.openai_client: openai.OpenAI = None
+        self.openai_async_client: openai.AsyncOpenAI = None
+        self.logger = get_logger(__name__)
+        self.enable_lora = config.enable_lora
+        self.enable_history = config.enable_history
+        self.history = []
+        self.status = RunningStatus.RUNNING
+        self.workflow_state: Dict = {}
+        self.request_count = 0
+        self.state_lock = asyncio.Lock()
+
+    async def prepare(self) -> None:
+        """Prepare some necessary information for the model before inference."""
+        if not self.config.enable_openai_api:
             return
-        if self._engine_type in {"tinker", "external"}:
+        if self.api_address is None:
+            if self.model is None:
+                raise ValueError("Cannot get API address from the model.")
+            self.api_address = await self.model.get_api_server_url.remote()
+            if self.api_address is None:
+                raise ValueError(
+                    "Cannot get API address from the model. API server might not be enabled for this model."
+                )
+
+        if self.config.engine_type in {"tinker", "external"}:
             return
         max_retries = 30
         interval = 2  # seconds
@@ -435,8 +470,7 @@ class ModelWrapper:
         """Get the version of the model."""
         return await self.model.get_model_version.remote()
 
-    @property
-    def model_path(self) -> str:
+    def fetch_model_path(self) -> str:
         """
         Returns the path to the model files based on the current engine type.
 
@@ -445,8 +479,7 @@ class ModelWrapper:
         """
         return ray.get(self.model.get_model_path.remote())
 
-    @property
-    async def model_path_async(self) -> str:
+    async def fetch_model_path_async(self) -> str:
         """
         Returns the path to the model files based on the current engine type.
 
@@ -456,9 +489,9 @@ class ModelWrapper:
         return await self.model.get_model_path.remote()
 
     @property
-    def model_name(self) -> Optional[str]:
+    def model_name(self) -> str:
         """Get the name of the model."""
-        return self._model_name
+        return self.config.model_path  # type: ignore [return-value]
 
     @property
     def model_config(self) -> InferenceModelConfig:
@@ -469,6 +502,9 @@ class ModelWrapper:
     def generate_kwargs(self) -> Dict[str, Any]:
         """Get the generation kwargs for openai client."""
         return self._generate_kwargs
+
+    async def get_available_address_async(self, random_port: bool = False) -> Tuple[str, int]:
+        return await self.model.get_available_address.remote(random_port=random_port)
 
     def get_lora_request(self) -> Any:
         if self.enable_lora:
@@ -493,13 +529,22 @@ class ModelWrapper:
         """
         import openai
 
+        if not self.config.enable_openai_api:
+            raise ValueError(
+                "OpenAI API is not enabled for this model. OpenAI client is unavailable."
+            )
+
         if self.openai_client is not None:
-            setattr(self.openai_client, "model_path", self.model_path)
+            setattr(self.openai_client, "model_path", self.config.model_path)
             return self.openai_client
         if not self.api_address:
-            raise ValueError(
-                "API server is not enabled for this model. OpenAI client is unavailable."
-            )
+            if self.model is None:
+                raise ValueError("Cannot get API address from the model.")
+            self.api_address = ray.get(self.model.get_api_server_url.remote())
+            if self.api_address is None:
+                raise ValueError(
+                    "Cannot get API address from the model. API server might not be enabled for this model."
+                )
         self.openai_client = openai.OpenAI(
             base_url=f"{self.api_address}/v1",
             api_key=self._api_key,
@@ -543,7 +588,7 @@ class ModelWrapper:
                 return response
 
             self.openai_client.chat.completions.create = record_chat_completions
-        setattr(self.openai_client, "model_path", self.model_path)
+        setattr(self.openai_client, "model_path", self.config.model_path)
         return self.openai_client
 
     def get_openai_async_client(self) -> "openai.AsyncOpenAI":
@@ -555,12 +600,16 @@ class ModelWrapper:
         import openai
 
         if self.openai_async_client is not None:
-            setattr(self.openai_async_client, "model_path", self.model_path)
+            setattr(self.openai_async_client, "model_path", self.config.model_path)
             return self.openai_async_client
         if not self.api_address:
-            raise ValueError(
-                "API server is not enabled for this model. OpenAI async client is unavailable."
-            )
+            if self.model is None:
+                raise ValueError("Cannot get API address from the model.")
+            self.api_address = ray.get(self.model.get_api_server_url.remote())
+            if self.api_address is None:
+                raise ValueError(
+                    "Cannot get API address from the model. API server might not be enabled for this model."
+                )
         # first make sure that we have the sync openai client
         self.openai_async_client = openai.AsyncOpenAI(
             base_url=f"{self.api_address}/v1",
@@ -607,7 +656,7 @@ class ModelWrapper:
 
             self.openai_async_client.chat.completions.create = record_chat_completions
         # get model_path from the sync openai client to avoid async call here
-        setattr(self.openai_async_client, "model_path", self.model_path)
+        setattr(self.openai_async_client, "model_path", self.config.model_path)
         return self.openai_async_client
 
     async def get_current_load(self) -> int:
@@ -621,9 +670,36 @@ class ModelWrapper:
             data = response.json()
             return data["server_load"]
 
-    async def sync_model_weights(self, model_version: int, method: SyncMethod) -> None:
+    async def init_process_group(
+        self,
+        master_address: str,
+        master_port: int,
+        rank_offset: int,
+        world_size: int,
+        group_name: str,
+        explorer_name: str,
+        timeout: int = 1200,
+        state_dict_meta: Optional[List] = None,
+    ):
+        """Initialize the process group for model weight synchronization."""
+
+        await self.model.init_process_group.remote(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=rank_offset,
+            world_size=world_size,
+            group_name=group_name,
+            explorer_name=explorer_name,
+            backend="nccl",
+            timeout=timeout,
+            state_dict_meta=state_dict_meta,
+        )
+
+    async def sync_model_weights(
+        self, model_version: int, method: SyncMethod, timeout: int = 1200
+    ) -> None:
         """Sync the model weights"""
-        await self.model.sync_model.remote(model_version, method)
+        await self.model.sync_model_weights.remote(model_version, method, timeout=timeout)
 
     def extract_experience_from_history(self, clear_history: bool = True) -> List[Experience]:
         """Extract experiences from the history."""
@@ -645,6 +721,15 @@ class ModelWrapper:
         async with self.state_lock:
             self.workflow_state = {}
             self.history.clear()
+
+    async def shutdown(self) -> None:
+        """Shutdown all underlying model actors cleanly."""
+        try:
+            await asyncio.gather(*[model.shutdown.remote() for model in self.models])
+        except Exception as e:
+            self.logger.error(
+                f"Error during model {self.config.model_path}[{self.config.engine_id}:{self.config.node_rank}] shutdown: {e}"
+            )
 
     async def get_workflow_state(self) -> Dict:
         """Get the state of workflow using the model."""

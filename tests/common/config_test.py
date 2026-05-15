@@ -31,7 +31,7 @@ class DummyInferenceModel(InferenceModel):
     async def convert_messages_to_experience(self, messages, tools=None, temperature=None):
         raise NotImplementedError
 
-    async def sync_model(
+    async def sync_model_weights(
         self, model_version: int, sync_method: SyncMethod, timeout: float = 1200
     ) -> int:
         return model_version
@@ -72,6 +72,95 @@ class TestConfig(unittest.TestCase):
         _, port = model.get_available_address()
 
         self.assertGreater(port, 0)
+
+    def test_inference_model_random_port_ignores_base_port(self):
+        requested_port = 9005
+        model = DummyInferenceModel(InferenceModelConfig(base_port=9000, engine_id=5))
+
+        _, port = model.get_available_address(random_port=True)
+
+        self.assertNotEqual(port, requested_port)
+        self.assertGreater(port, 0)
+
+    def test_inference_model_random_port_can_use_port_reserved_by_api_server(self):
+        requested_port = 9006
+        model = DummyInferenceModel(InferenceModelConfig(base_port=9000, engine_id=6))
+
+        with socket.socket() as occupied_socket:
+            occupied_socket.bind(("", requested_port))
+
+            _, port = model.get_available_address(random_port=True)
+
+        self.assertNotEqual(port, requested_port)
+        self.assertGreater(port, 0)
+
+    def test_multinode_vllm_config_is_valid(self):
+        config = get_template_config()
+        config.mode = "explore"
+        config.cluster.node_num = 2
+        config.cluster.gpu_per_node = 4
+        config.explorer.rollout_model.engine_type = "vllm"
+        config.explorer.rollout_model.engine_num = 1
+        config.explorer.rollout_model.tensor_parallel_size = 8
+        config.explorer.rollout_model.nnodes = 2
+
+        config.check_and_update()
+
+        self.assertEqual(config.explorer.rollout_model.nnodes, 2)
+
+    def test_multinode_vllm_requires_nnodes_within_cluster_size(self):
+        config = get_template_config()
+        config.mode = "explore"
+        config.cluster.node_num = 2
+        config.cluster.gpu_per_node = 4
+        config.explorer.rollout_model.engine_type = "vllm"
+        config.explorer.rollout_model.engine_num = 1
+        config.explorer.rollout_model.tensor_parallel_size = 8
+        config.explorer.rollout_model.nnodes = 3
+
+        with self.assertRaisesRegex(ValueError, "cannot exceed cluster.node_num"):
+            config.check_and_update()
+
+    def test_multinode_vllm_requires_full_node_occupancy(self):
+        config = get_template_config()
+        config.mode = "explore"
+        config.cluster.node_num = 3
+        config.cluster.gpu_per_node = 4
+        config.explorer.rollout_model.engine_type = "vllm"
+        config.explorer.rollout_model.engine_num = 1
+        config.explorer.rollout_model.tensor_parallel_size = 6
+        config.explorer.rollout_model.nnodes = 2
+
+        with self.assertRaisesRegex(ValueError, "integer multiple of cluster.gpu_per_node"):
+            config.check_and_update()
+
+    def test_multinode_vllm_requires_matching_nnodes_for_full_nodes(self):
+        config = get_template_config()
+        config.mode = "explore"
+        config.cluster.node_num = 4
+        config.cluster.gpu_per_node = 4
+        config.explorer.rollout_model.engine_type = "vllm"
+        config.explorer.rollout_model.engine_num = 1
+        config.explorer.rollout_model.tensor_parallel_size = 8
+        config.explorer.rollout_model.nnodes = 4
+
+        with self.assertRaisesRegex(
+            ValueError, "must equal tensor_parallel_size // cluster.gpu_per_node"
+        ):
+            config.check_and_update()
+
+    def test_multinode_inference_is_rejected_for_non_vllm_sglang_engines(self):
+        config = get_template_config()
+        config.mode = "explore"
+        config.cluster.node_num = 2
+        config.cluster.gpu_per_node = 4
+        config.explorer.rollout_model.engine_type = "tinker"
+        config.explorer.rollout_model.engine_num = 1
+        config.explorer.rollout_model.tensor_parallel_size = 4
+        config.explorer.rollout_model.nnodes = 2
+
+        with self.assertRaisesRegex(ValueError, "only supported for"):
+            config.check_and_update()
 
     def test_load_default_config(self):
         config = get_template_config()

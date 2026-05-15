@@ -142,9 +142,9 @@ class AgentScopeWorkflowAdapterV1(Workflow):
                 )
                 aux_chat_model.client = aux_model_client
                 assert (
-                    aux_model_wrapper.model_name is not None
+                    aux_model_wrapper.config.name is not None
                 ), "Auxiliary model must have a name. This should not happen."
-                self.auxiliary_chat_models[aux_model_wrapper.model_name] = aux_chat_model
+                self.auxiliary_chat_models[aux_model_wrapper.config.name] = aux_chat_model
 
     def construct_experiences(
         self,

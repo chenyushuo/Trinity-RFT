@@ -30,6 +30,13 @@ def get_available_port() -> int:
         return s.getsockname()[1]
 
 
+def get_endpoint(host: str, port: int) -> str:
+    if is_ipv6_address(ip_str=host):
+        return f"[{host}]:{port}"
+    else:
+        return f"{host}:{port}"
+
+
 def is_port_available(port: int, host="127.0.0.1") -> bool:
     with socket.socket() as s:
         try:

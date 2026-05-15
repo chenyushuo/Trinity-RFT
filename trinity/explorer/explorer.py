@@ -23,7 +23,8 @@ from trinity.common.constants import (
     SyncMethod,
     SyncStyle,
 )
-from trinity.common.models import create_explorer_models
+from trinity.common.models.allocator import Allocator
+from trinity.common.models.model import ModelWrapper
 from trinity.explorer.rollout_coordinator import RolloutCoordinator
 from trinity.manager.state_manager import StateManager
 from trinity.manager.synchronizer import Synchronizer
@@ -49,7 +50,9 @@ class Explorer:
         self.synchronizer = Synchronizer.get_actor(config)
         self.config = config
         self.model_type = config.explorer.rollout_model.engine_type
-        self.models, self.auxiliary_models = create_explorer_models(config)
+        self.model_allocator = Allocator(config.explorer)
+        self.models: List[ModelWrapper] = []
+        self.auxiliary_models: List[List[ModelWrapper]] = []
         self.taskset = (
             get_taskset_scheduler(explorer_state=explorer_state, config=config)
             if self.config.mode not in {"bench", "serve"}
@@ -89,9 +92,26 @@ class Explorer:
         self.explore_start_time = None
         self.logger.info("Finished initializing Explorer.")
 
+    async def _wait_for_models_ready(self) -> None:
+        """Wait until rollout models are created before using them."""
+        if self.models:
+            return
+
+        timeout = max(self.config.synchronizer.sync_timeout, 1)
+        deadline = time.monotonic() + timeout
+        self.logger.info("Waiting for rollout models to finish initialization.")
+        while not self.models:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Timed out waiting for rollout models before initializing the weight sync group."
+                )
+            await asyncio.sleep(0.1)
+        self.logger.info("Rollout models are ready. Continue weight sync initialization.")
+
     async def setup_weight_sync_group(
         self, master_address: str, master_port: int, state_dict_meta: List = None
     ):
+        await self._wait_for_models_ready()
         base_offset = 1 if self.use_nccl_sync else 0
         world_size = (
             len(self.models) * self.config.explorer.rollout_model.tensor_parallel_size + base_offset
@@ -101,9 +121,9 @@ class Explorer:
             f"master_address={master_address}, master_port={master_port}, "
             f"world_size={world_size}, rank_offset={base_offset}"
         )
-        # TODO: save state_dict in models
+
         refs = [
-            model.init_process_group.remote(
+            model.init_process_group(
                 master_address=master_address,
                 master_port=master_port,
                 rank_offset=i * self.config.explorer.rollout_model.tensor_parallel_size
@@ -120,17 +140,18 @@ class Explorer:
 
     async def setup_model_level_weight_sync_group(self):
         """Setup process group for each model, only used in serve mode."""
+        await self._wait_for_models_ready()
         refs = []
         world_size = self.config.explorer.rollout_model.tensor_parallel_size
         for model in self.models:
-            master_address, master_port = await model.get_available_address.remote()
+            master_address, master_port = await model.get_available_address_async(random_port=True)
             self.logger.info(
                 f"Initialize process group for model weight synchronization, "
                 f"master_address={master_address}, master_port={master_port}, "
                 f"world_size={world_size}"
             )
             refs.append(
-                model.init_process_group.remote(
+                model.init_process_group(
                     master_address=master_address,
                     master_port=master_port,
                     rank_offset=0,
@@ -145,9 +166,14 @@ class Explorer:
     async def _checkpoint_weights_update(self, step_num: Optional[int] = None) -> int:
         self.logger.info(f"Start to update model weights from checkpoint at step {step_num}.")
         step_num = await self.synchronizer.set_model_state_dict_with_step_num.remote(step_num)
+        if step_num is None or step_num <= self.model_version:
+            self.logger.warning(
+                f"No new checkpoint found for step {step_num}. Current model version: {self.model_version}."
+            )
+            return self.model_version
         await asyncio.gather(
             *[
-                model.sync_model.remote(
+                model.sync_model_weights(
                     step_num,
                     self.config.synchronizer.sync_method,
                     timeout=self.config.synchronizer.sync_timeout,
@@ -168,7 +194,7 @@ class Explorer:
                 self.logger.info(f"New model weights version: {new_version}")
                 await asyncio.gather(
                     *[
-                        model.sync_model.remote(
+                        model.sync_model_weights(
                             new_version,
                             self.config.synchronizer.sync_method,
                             timeout=self.config.synchronizer.sync_timeout,
@@ -192,7 +218,7 @@ class Explorer:
         self.model_version = new_version
         await asyncio.gather(
             *[
-                model.sync_model.remote(
+                model.sync_model_weights(
                     self.model_version,
                     self.config.synchronizer.sync_method,
                     timeout=self.config.synchronizer.sync_timeout,
@@ -205,33 +231,26 @@ class Explorer:
         """Preparation before running."""
         try:
             # make sure all rollout models are ready
-            run_api_ref = [model.prepare.remote() for model in self.models]
-            run_api_ref.extend(
-                model.prepare.remote() for models in self.auxiliary_models for model in models
-            )
-            await asyncio.gather(*run_api_ref)
+            self.models, self.auxiliary_models = await self.model_allocator.create_all_models()
             self.logger.info("All models are ready.")
             if not self.use_nccl_sync and self.model_type not in {"tinker", "external"}:
                 if self.config.mode == "serve":
                     # In serving mode, each engine will setup its own process group
                     await self.setup_model_level_weight_sync_group()
                 else:
-                    master_address, master_port = await self.models[
-                        0
-                    ].get_available_address.remote()
+                    master_address, master_port = await self.models[0].get_available_address_async(
+                        random_port=True
+                    )
                     await self.setup_weight_sync_group(master_address, master_port)
 
-            self.rollout_coordinator = RolloutCoordinator.get_actor(
-                self.config,
-                self.models,
-                self.auxiliary_models,
-            )
+            self.rollout_coordinator = RolloutCoordinator.get_actor(self.config)
             await self.rollout_coordinator.prepare.remote()
             self.logger.info("Rollout coordinator is ready.")
             if self.config.explorer.eval_on_startup and self.explore_step_num == 0:
                 await self.eval()
 
             await self.synchronizer.set_explorer_status.remote(RunningStatus.RUNNING)
+            self.logger.info("Explorer is ready.")
         except Exception as e:
             self.logger.error(f"Error during explorer preparation: {traceback.format_exc()}")
             await self.shutdown()
@@ -473,10 +492,10 @@ class Explorer:
             self.monitor = None
         handlers = []
         for model in self.models:
-            handlers.append(model.shutdown.remote())
+            handlers.append(model.shutdown())
         for auxiliary_model_list in self.auxiliary_models:
             for model in auxiliary_model_list:
-                handlers.append(model.shutdown.remote())
+                handlers.append(model.shutdown())
         await asyncio.gather(*handlers)
         self.logger.info(
             f"Explorer ({self.config.explorer.name}) shutdown successfully at step {self.explore_step_num}."

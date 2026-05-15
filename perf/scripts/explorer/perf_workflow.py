@@ -77,4 +77,6 @@ class PerfWorkflow(Workflow):
                 else 0.0
             ),
         }
+        for exp in exps:
+            exp.reward = 1.0
         return exps

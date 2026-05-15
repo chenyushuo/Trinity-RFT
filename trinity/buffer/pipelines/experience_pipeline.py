@@ -100,11 +100,17 @@ class ExperiencePipeline:
             self.operators.append(operator)
 
     async def prepare(self) -> None:
-        from trinity.common.models import get_auxiliary_model_wrappers
+        from trinity.common.models.allocator import Allocator
 
-        # make sure auxiliary models are ready before creating operators
-        model_wrappers = await get_auxiliary_model_wrappers(self.config)
-        self.auxiliary_model_wrappers.update(model_wrappers)
+        allocator = Allocator(self.config.explorer)
+        for i, auxiliary_model_config in enumerate(self.config.explorer.auxiliary_models):
+            key = auxiliary_model_config.name or i
+            self.auxiliary_model_wrappers[key] = []
+            for engine_id in range(auxiliary_model_config.engine_num):
+                self.auxiliary_model_wrappers[key].append(
+                    allocator.get_model(auxiliary_model_config, f"auxiliary_{i}", engine_id)
+                )
+
         self.auxiliary_models = (
             {
                 model_name: [

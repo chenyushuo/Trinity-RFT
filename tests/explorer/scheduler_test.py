@@ -1,6 +1,7 @@
 import asyncio
 import time
 import unittest
+import uuid
 from collections import defaultdict
 from typing import Dict, List, Optional, Sequence
 from unittest.mock import AsyncMock, patch
@@ -13,6 +14,7 @@ from tests.tools import get_template_config
 from trinity.common.config import ExperienceBufferConfig
 from trinity.common.constants import StorageType, SyncStyle
 from trinity.common.experience import EID, Experience
+from trinity.common.models.allocator import Allocator
 from trinity.common.models.model import InferenceModel, ModelWrapper
 from trinity.common.workflows import WORKFLOWS, Task, Workflow
 from trinity.explorer.scheduler import Scheduler
@@ -282,7 +284,7 @@ class DummyModel(InferenceModel):
 
         super().__init__(InferenceModelConfig(model_path="dummy_model"))
 
-    def sync_model(self, model_version, sync_method, timeout):
+    def sync_model_weights(self, model_version, sync_method, timeout):
         return True
 
     async def prepare(self):
@@ -291,15 +293,17 @@ class DummyModel(InferenceModel):
     def get_model_version(self):
         return 0
 
-    def init_process_group(
+    async def init_process_group(
         self,
         master_address: str,
         master_port: int,
         rank_offset: int,
         world_size: int,
         group_name: str,
+        explorer_name: str,
         backend: str = "nccl",
         timeout: int = 1200,
+        state_dict_meta: Optional[List] = None,
     ) -> None:
         pass
 
@@ -329,26 +333,80 @@ class DummyModel(InferenceModel):
 
 @ray.remote
 class DummyAuxiliaryModel(InferenceModel):
-    def sync_model(self, model_version, sync_method, timeout):
+    def sync_model_weights(self, model_version, sync_method, timeout):
         return True
 
     def get_model_version(self):
         return 0
 
-    def init_process_group(
+    async def init_process_group(
         self,
         master_address: str,
         master_port: int,
         rank_offset: int,
         world_size: int,
         group_name: str,
+        explorer_name: str,
         backend: str = "nccl",
         timeout: int = 1200,
+        state_dict_meta: Optional[List] = None,
     ) -> None:
         pass
 
     def get_api_server_url(self) -> str:
         return "http://localhost:12345"
+
+
+def _create_named_model_actors(config) -> List:
+    allocator = Allocator(config.explorer)
+    actor_handles = []
+
+    def create_role_models(model_config, role, actor_cls) -> None:
+        for engine_id in range(model_config.engine_num):
+            actor_name = allocator.get_actor_name(role, engine_id, 0)
+            actor_handles.append(
+                actor_cls.options(
+                    name=actor_name,
+                    namespace=model_config.ray_namespace,
+                    num_cpus=0,
+                ).remote()
+            )
+
+    create_role_models(config.explorer.rollout_model, "rollout", DummyModel)
+    for index, auxiliary_config in enumerate(config.explorer.auxiliary_models):
+        create_role_models(auxiliary_config, f"auxiliary_{index}", DummyAuxiliaryModel)
+
+    for actor_handle in actor_handles:
+        ray.get(actor_handle.prepare.remote())
+        ray.get(actor_handle.get_api_server_url.remote())
+
+    return actor_handles
+
+
+def _cleanup_named_model_actors(actor_handles: Optional[List]) -> None:
+    if not actor_handles:
+        return
+    for actor_handle in reversed(actor_handles):
+        try:
+            ray.kill(actor_handle)
+        except Exception:
+            pass
+
+
+def _align_model_namespaces(config) -> None:
+    config.explorer.rollout_model.ray_namespace = config.ray_namespace
+    for auxiliary_config in config.explorer.auxiliary_models:
+        auxiliary_config.ray_namespace = config.ray_namespace
+
+
+def _assign_test_namespace(config) -> None:
+    config.ray_namespace = f"scheduler-test-{uuid.uuid4().hex}"
+    _align_model_namespaces(config)
+
+
+def _configure_dummy_models(config) -> None:
+    for auxiliary_config in config.explorer.auxiliary_models:
+        auxiliary_config.enable_openai_api = True
 
 
 def generate_tasks(
@@ -424,6 +482,8 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         ray.init(ignore_reinit_error=True)
         DummyAsyncPartialSnapshotWorkflow._run_index_by_key.clear()
         self.config = get_template_config()
+        _assign_test_namespace(self.config)
+        _configure_dummy_models(self.config)
         self.config.explorer.max_retry_times = 1
         self.config.explorer.max_timeout = 5
         self.config.explorer.runner_per_model = 2
@@ -440,9 +500,10 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.config.buffer.trainer_input.experience_buffer.max_read_timeout = 1
         self.config.algorithm.repeat_times = 1
         self.config.check_and_update()
+        self.model_actors = _create_named_model_actors(self.config)
 
     async def test_get_payload_results(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         tasks = generate_tasks(8)
@@ -545,77 +606,8 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
 
         await scheduler.stop()
 
-    async def test_wait_all(self):
-        """Test wait all"""
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
-        await scheduler.start()
-
-        tasks1 = generate_tasks(4)
-        tasks2 = generate_tasks(3)
-        scheduler.schedule(tasks1, batch_id=0)
-        scheduler.schedule(tasks2, batch_id=1)
-
-        start_time = time.time()
-        await scheduler.wait_all(timeout=10.0)
-        end_time = time.time()
-
-        self.assertLess(end_time - start_time, 5.0)
-
-        self.assertEqual(len(scheduler.pending_tasks), 0)
-        self.assertEqual(len(scheduler.running_tasks), 0)
-
-        status0, exps0 = await collect_results(scheduler, batch_id=0, min_num=4, timeout=1)
-        status1, exps1 = await collect_results(scheduler, batch_id=1, min_num=3, timeout=1)
-        self.assertEqual(len(status0), 4)
-        self.assertEqual(len(status1), 3)
-
-        # test timeout
-        tasks = generate_tasks(2, timeout_num=2, timeout_seconds=10)
-        scheduler.schedule(tasks, batch_id=0)
-
-        start_time = time.time()
-        with self.assertRaises(TimeoutError):
-            await scheduler.wait_all(timeout=3.0)
-        end_time = time.time()
-
-        self.assertGreaterEqual(end_time - start_time, 2.8)
-        self.assertLessEqual(end_time - start_time, 4.0)
-
-        # test empty scenario
-
-        start_time = time.time()
-        await scheduler.wait_all(timeout=5.0)
-        end_time = time.time()
-
-        self.assertLess(end_time - start_time, 1.0)
-        await scheduler.stop()
-
-    async def test_wait_all_timeout_with_multi_batch(self):
-        self.config.explorer.max_timeout = 5
-        self.config.explorer.rollout_model.engine_num = 4
-        self.config.explorer.runner_per_model = 1
-
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
-        await scheduler.start()
-
-        tasks = generate_tasks(1, timeout_num=3, timeout_seconds=3)
-        scheduler.schedule(tasks, batch_id=0)
-        tasks = generate_tasks(2, timeout_num=2, timeout_seconds=3)
-        scheduler.schedule(tasks, batch_id=1)
-        tasks = generate_tasks(3, timeout_num=1, timeout_seconds=3)
-        scheduler.schedule(tasks, batch_id=2)
-        start_time = time.time()
-        await scheduler.wait_all()
-        end_time = time.time()
-        self.assertTrue(
-            end_time - start_time > 9,
-            f"wait time should be greater than 9, but got {end_time - start_time}",
-        )
-
-        await scheduler.stop()
-
     async def test_concurrent_operations(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         async def schedule_tasks(batch_id, num_tasks):
@@ -638,7 +630,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         await scheduler.stop()
 
     async def test_scheduler_restart_after_stop(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote()])
+        scheduler = Scheduler(self.config)
 
         await scheduler.start()
         tasks = generate_tasks(2)
@@ -656,47 +648,10 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(exps), 3 * 2)
         await scheduler.stop()
 
-    async def test_scheduler_all_methods(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
-        await scheduler.start()
-        tasks = generate_tasks(8)
-        scheduler.schedule(tasks, batch_id=0)
-        self.assertTrue(scheduler.has_step(0))
-        statuses, exps = await collect_results(scheduler, batch_id=0, min_num=8, timeout=20)
-        self.assertEqual(len(statuses), 8)
-        self.assertEqual(len(exps), 8)
-        scheduler.schedule(tasks, batch_id=1)
-        scheduler.schedule(tasks[:4], batch_id=2)
-        self.assertFalse(scheduler.has_step(0))
-        statuses, exps = await collect_results(scheduler, batch_id=0, min_num=8)
-        self.assertFalse(scheduler.has_step(0))
-        self.assertEqual(len(statuses), 0)  # batch_id 0 has no more tasks
-        self.assertEqual(len(exps), 0)
-        self.assertFalse(scheduler.has_step(0))
-        self.assertTrue(scheduler.has_step(1))
-        self.assertTrue(scheduler.has_step(2))
-        await scheduler.wait_all()
-        st = time.time()
-        statuses, exps = await collect_results(scheduler, batch_id=1)
-        et = time.time()
-        self.assertTrue(et - st < 1.0)
-        self.assertEqual(len(statuses), 8)
-        self.assertEqual(len(exps), 8)
-        self.assertFalse(scheduler.has_step(1))
-        self.assertTrue(scheduler.has_step(2))
-        st = time.time()
-        statuses, exps = await collect_results(scheduler, batch_id=2)
-        et = time.time()
-        self.assertTrue(et - st < 1.0)
-        self.assertEqual(len(statuses), 4)
-        self.assertEqual(len(exps), 4)
-        self.assertFalse(scheduler.has_step(2))
-        await scheduler.stop()
-
     async def test_split_tasks(self):
         self.config.explorer.max_repeat_times_per_runner = 2
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         exp_list = []
 
@@ -740,7 +695,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def test_multi_step_execution(self):
         self.config.explorer.max_repeat_times_per_runner = 1
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         tasks = generate_tasks(2, repeat_times=4)
 
@@ -756,7 +711,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def test_non_repeatable_workflow(self):
         self.config.explorer.max_repeat_times_per_runner = 2
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         task_num, repeat_times = 5, 4
         tasks = generate_tasks(task_num, repeat_times=repeat_times, repeatable=False)
@@ -789,7 +744,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def test_async_workflow(self):
         self.config.explorer.max_repeat_times_per_runner = 2
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         task_num, repeat_times, step_num = 5, 4, 3
         tasks = [
@@ -825,7 +780,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.config.buffer.train_batch_size = task_num * repeat_times * step_num
         self.config.explorer.max_repeat_times_per_runner = 2
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         batch_num = 2
 
@@ -878,7 +833,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def test_metric_calculation_with_repeatable_workflow(self, max_repeat_times_per_runner):
         self.config.explorer.max_repeat_times_per_runner = max_repeat_times_per_runner
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         tasks = []
         tasks.extend(generate_tasks(total_num=1, step_num=1, repeat_times=4, repeatable=True))
@@ -902,7 +857,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
     ):
         self.config.explorer.max_repeat_times_per_runner = max_repeat_times_per_runner
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         tasks = []
         tasks.extend(generate_tasks(total_num=1, step_num=3, repeat_times=4, repeatable=False))
@@ -926,7 +881,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.config.buffer.batch_size = 4
         self.config.synchronizer.sync_style = SyncStyle.EXPLORER_DRIVEN
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         tasks = []
         tasks.extend(generate_tasks(0, timeout_num=2, repeat_times=1, timeout_seconds=1))
@@ -945,7 +900,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.config.synchronizer.sync_style = SyncStyle.EXPLORER_DRIVEN
         self.config.buffer.batch_size = 2
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         tasks = [
@@ -1046,7 +1001,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.config.synchronizer.sync_style = SyncStyle.EXPLORER_DRIVEN
         self.config.buffer.batch_size = 2
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         tasks = [
@@ -1096,15 +1051,17 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         await scheduler.stop()
 
     async def test_over_rollout_sync_cancel_does_not_imply_immediate_runner_reuse(self):
+        self.config.mode = "explore"
         self.config.explorer.over_rollout.ratio = 0.5
         self.config.explorer.over_rollout.wait_after_min = 0.5
         self.config.explorer.over_rollout.return_partial_tasks = True
         self.config.explorer.max_repeat_times_per_runner = 2
         self.config.explorer.runner_per_model = 1
+        self.config.explorer.rollout_model.engine_num = 1
         self.config.synchronizer.sync_style = SyncStyle.EXPLORER_DRIVEN
         self.config.buffer.batch_size = 2
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         tasks = [
@@ -1169,7 +1126,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.config.explorer.max_repeat_times_per_runner = None
         self.config.synchronizer.sync_style = SyncStyle.EXPLORER_DRIVEN
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         tasks = generate_tasks(0, timeout_num=2, repeat_times=1, timeout_seconds=10)
@@ -1185,7 +1142,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def test_unexpected_task_exception_restarts_runner(self):
         self.config.explorer.runner_per_model = 1
         self.config.check_and_update()
-        scheduler = Scheduler(self.config, [DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         scheduler.runners[0].run_with_retry = AsyncMock(side_effect=RuntimeError("boom"))
@@ -1216,7 +1173,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.config.buffer.batch_size = 4
         self.config.explorer.max_timeout = 20
         self.config.explorer.max_retry_times = 0  # no retry here
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
         tasks = []
         tasks.extend(generate_tasks(0, timeout_num=4, repeat_times=1, timeout_seconds=1))
@@ -1267,7 +1224,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.config.explorer.max_repeat_times_per_runner = 2
         self.config.check_and_update()
 
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         tasks = generate_tasks(0, timeout_num=2, repeat_times=4, timeout_seconds=1)
@@ -1293,7 +1250,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         await scheduler.stop()
 
     async def test_collect_results_reads_payloads_returned_by_workflow_runner(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         scheduler.schedule(generate_tasks(3, repeat_times=2), batch_id=0)
@@ -1305,7 +1262,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         await scheduler.stop()
 
     async def test_timeout_cleanup_keeps_completed_payloads_local(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         scheduler.schedule(generate_tasks(1, timeout_num=1, timeout_seconds=10), batch_id=0)
@@ -1317,7 +1274,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         await scheduler.stop()
 
     async def test_eval_tasks_do_not_return_training_experiences(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         eval_tasks = generate_tasks(2, repeat_times=2)
@@ -1333,7 +1290,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         await scheduler.stop()
 
     async def test_get_statuses_skips_payload_deserialization(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         scheduler.schedule(generate_tasks(2, repeat_times=2), batch_id=0)
@@ -1349,7 +1306,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         await scheduler.stop()
 
     async def test_get_payload_results_keeps_payloads_serialized(self):
-        scheduler = Scheduler(self.config, [DummyModel.remote(), DummyModel.remote()])
+        scheduler = Scheduler(self.config)
         await scheduler.start()
 
         scheduler.schedule(generate_tasks(2, repeat_times=2), batch_id=0)
@@ -1368,20 +1325,39 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         try:
+            _cleanup_named_model_actors(getattr(self, "model_actors", None))
+        except Exception:
+            pass
+        try:
             ray.shutdown()
         except Exception:
             pass
 
 
 class TestRunnerStateCollection(unittest.IsolatedAsyncioTestCase):
-    async def test_runner_state_collection(self):
+    def setUp(self):
         ray.init(ignore_reinit_error=True)
-        config = get_template_config()
-        config.explorer.runner_per_model = 2
-        config.explorer.runner_state_report_interval = 0.5
-        config.explorer.max_repeat_times_per_runner = 2
-        config.check_and_update()
-        scheduler = Scheduler(config, [DummyModel.remote(), DummyModel.remote()])
+        self.config = get_template_config()
+        _assign_test_namespace(self.config)
+        _configure_dummy_models(self.config)
+        self.config.explorer.runner_per_model = 2
+        self.config.explorer.runner_state_report_interval = 1
+        self.config.explorer.max_repeat_times_per_runner = 2
+        self.config.check_and_update()
+        self.model_actors = _create_named_model_actors(self.config)
+
+    def tearDown(self):
+        try:
+            _cleanup_named_model_actors(getattr(self, "model_actors", None))
+        except Exception:
+            pass
+        try:
+            ray.shutdown()
+        except Exception:
+            pass
+
+    async def test_runner_state_collection(self):
+        scheduler = Scheduler(self.config)
         # 4 runner in side the scheduler
         await scheduler.start()
 
@@ -1398,7 +1374,7 @@ class TestRunnerStateCollection(unittest.IsolatedAsyncioTestCase):
 
         async def monitor_routine():
             runner_0_state_history = defaultdict(set)
-            await asyncio.sleep(0.5)  # wait for first report
+            await asyncio.sleep(self.config.explorer.runner_state_report_interval + 0.2)
             for _ in range(16):
                 await asyncio.sleep(0.3)
                 states = scheduler.get_all_state()
@@ -1426,3 +1402,4 @@ class TestRunnerStateCollection(unittest.IsolatedAsyncioTestCase):
             monitor_routine(),
             collect_results(scheduler, batch_id=0),
         )
+        await scheduler.stop()

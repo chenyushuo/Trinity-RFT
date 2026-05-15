@@ -84,7 +84,7 @@ class WorkerExtension:
                 weight = state_dict[name]
                 weight = weight.to(self.device)
             else:
-                dtype = getattr(torch, dtype_str.split(".")[-1])
+                dtype = getattr(torch, dtype_str)
                 weight = torch.empty(shape, dtype=dtype, device=self.device)
             torch.distributed.broadcast(weight, 0, group=self._model_update_group)
             weight = weight.type(self.model_config.dtype)

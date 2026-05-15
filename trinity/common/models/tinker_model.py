@@ -150,7 +150,7 @@ class TinkerModel(BaseInferenceModel):
         )
         await self._initialize_tokenizer()
 
-    async def sync_model(
+    async def sync_model_weights(
         self, model_version: int, sync_method: SyncMethod, timeout: float = 1200
     ) -> int:
         self.model_version = model_version

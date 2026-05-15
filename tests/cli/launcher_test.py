@@ -2,7 +2,6 @@ import multiprocessing
 import os
 import shutil
 import sys
-import time
 import unittest
 from unittest import mock
 from unittest.mock import MagicMock
@@ -23,16 +22,16 @@ from trinity.common.config import (
     TrainerInput,
 )
 from trinity.common.constants import (
+    DEBUG_NAMESPACE,
     LOG_DIR_ENV_VAR,
     LOG_LEVEL_ENV_VAR,
     LOG_NODE_IP_ENV_VAR,
 )
-from trinity.common.models import get_debug_explorer_model
 
 runner = TyperCliRunner()
 
 
-class TestLauncherMain(unittest.TestCase):
+class TestLauncherMain(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         if multiprocessing.get_start_method(allow_none=True) != "spawn":
             multiprocessing.set_start_method("spawn", force=True)
@@ -266,139 +265,111 @@ class TestLauncherMain(unittest.TestCase):
                 "/path/to/hf/checkpoint",
             )
 
-    @mock.patch("trinity.cli.launcher.load_config")
-    def test_debug_mode(self, mock_load):
-        process = multiprocessing.Process(target=debug_inference_model_process)
-        try:
-            process.start()
-            time.sleep(15)  # wait for the model to be created
-            for _ in range(10):
-                try:
-                    get_debug_explorer_model(self.config)
-                    break
-                except Exception:
-                    time.sleep(3)
-            output_file = os.path.join(self.config.checkpoint_job_dir, "debug.html")
-            output_dir = os.path.join(self.config.checkpoint_job_dir, "debug_output")
-            self.config.buffer.explorer_input.tasksets = [get_unittest_dataset_config("gsm8k")]
-            mock_load.return_value = self.config
+    @mock.patch("trinity.cli.debug.asyncio.run")
+    @mock.patch("trinity.cli.debug.create_debug_models", new_callable=mock.MagicMock)
+    @mock.patch("trinity.cli.debug.ray.init")
+    @mock.patch("trinity.cli.debug.load_plugins")
+    @mock.patch("trinity.cli.debug.load_config")
+    def test_debug_inference_model_module(
+        self,
+        mock_load,
+        mock_load_plugins,
+        mock_ray_init,
+        mock_create_debug_models,
+        mock_asyncio_run,
+    ):
+        self.config.explorer.rollout_model.engine_num = 4
+        for index, auxiliary_model in enumerate(self.config.explorer.auxiliary_models, start=2):
+            auxiliary_model.engine_num = index
+        mock_load.return_value = self.config
 
-            # First run: workflow with profiling enabled
-            result = runner.invoke(
-                launcher.app,
-                [
-                    "debug",
-                    "--config",
-                    "dummy.yaml",
-                    "--module",
-                    "workflow",
-                    "--enable-profiling",
-                    "--output-dir",
-                    output_dir,
-                ],
-            )
-            self.assertEqual(result.exit_code, 0, msg=result.output)
+        result = runner.invoke(
+            launcher.app,
+            [
+                "debug",
+                "--config",
+                "dummy.yaml",
+                "--module",
+                "inference_model",
+                "--plugin-dir",
+                "/path/to/plugins",
+            ],
+        )
 
-            self.assertFalse(os.path.exists(output_file))
-            self.assertTrue(os.path.exists(output_dir))
-            self.assertTrue(os.path.exists(os.path.join(output_dir, "profiling.html")))
-            self.assertTrue(os.path.exists(os.path.join(output_dir, "experiences.db")))
-            origin_db_size = os.path.getsize(os.path.join(output_dir, "experiences.db"))
-            self.assertTrue(
-                os.path.exists(os.path.join(output_dir, "log", "explorer_runner_0.log"))
-            )
-            # assert not empty log file
-            origin_log_size = os.path.getsize(
-                os.path.join(output_dir, "log", "explorer_runner_0.log")
-            )
-            self.assertTrue(origin_log_size > 0)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_load_plugins.assert_called_once_with()
+        mock_load.assert_called_once_with("dummy.yaml")
+        self.assertEqual(self.config.mode, "explore")
+        self.assertEqual(self.config.ray_namespace, DEBUG_NAMESPACE)
+        self.assertEqual(self.config.explorer.rollout_model.engine_num, 1)
+        self.assertTrue(
+            all(aux_model.engine_num == 1 for aux_model in self.config.explorer.auxiliary_models)
+        )
+        self.assertEqual(os.environ[launcher.PLUGIN_DIRS_ENV_VAR], "/path/to/plugins")
+        mock_ray_init.assert_called_once_with(
+            namespace=DEBUG_NAMESPACE,
+            runtime_env={"env_vars": self.config.get_envs()},
+            ignore_reinit_error=True,
+        )
+        mock_create_debug_models.assert_called_once_with(self.config)
+        mock_asyncio_run.assert_called_once_with(mock_create_debug_models.return_value)
 
-            # add a dummy file to test overwrite behavior
-            with open(os.path.join(output_dir, "dummy.txt"), "w") as f:
-                f.write("not empty")
+    @mock.patch("trinity.cli.debug.asyncio.run")
+    @mock.patch("trinity.cli.debug.ray.init")
+    @mock.patch("trinity.cli.debug.load_plugins")
+    @mock.patch("trinity.cli.debug.load_config")
+    @mock.patch("trinity.explorer.workflow_runner.DebugWorkflowRunner")
+    def test_debug_workflow_module(
+        self,
+        mock_runner_cls,
+        mock_load,
+        mock_load_plugins,
+        mock_ray_init,
+        mock_asyncio_run,
+    ):
+        output_dir = os.path.join(self.config.checkpoint_job_dir, "debug_output")
+        mock_load.return_value = self.config
+        runner_instance = mock_runner_cls.return_value
+        runner_instance.prepare = mock.MagicMock(return_value=object())
+        runner_instance.debug = mock.MagicMock(return_value=object())
 
-            # Second run: workflow without profiling, overwrite allowed (default)
-            result = runner.invoke(
-                launcher.app,
-                [
-                    "debug",
-                    "--config",
-                    "dummy.yaml",
-                    "--module",
-                    "workflow",
-                    "--output-dir",
-                    output_dir,
-                ],
-            )
-            self.assertEqual(result.exit_code, 0, msg=result.output)
+        result = runner.invoke(
+            launcher.app,
+            [
+                "debug",
+                "--config",
+                "dummy.yaml",
+                "--module",
+                "workflow",
+                "--enable-profiling",
+                "--disable-overwrite",
+                "--output-dir",
+                output_dir,
+            ],
+        )
 
-            dirs = os.listdir(self.config.checkpoint_job_dir)
-            target_output_dir = [d for d in dirs if d.startswith("debug_output_")]
-            self.assertEqual(
-                len(target_output_dir),
-                0,
-                msg=f"Expected no new output directory, but found: {target_output_dir}",
-            )
-            new_log_size = os.path.getsize(os.path.join(output_dir, "log", "explorer_runner_0.log"))
-            self.assertTrue(new_log_size > origin_log_size)
-            new_db_size = os.path.getsize(os.path.join(output_dir, "experiences.db"))
-            self.assertTrue(new_db_size > origin_db_size)
-
-            # Third run: workflow without profiling, overwrite disabled
-            import trinity.utils.log as log
-
-            log._ray_logger_ctx.set(None)
-            log._ray_logger = None
-
-            result = runner.invoke(
-                launcher.app,
-                [
-                    "debug",
-                    "--config",
-                    "dummy.yaml",
-                    "--module",
-                    "workflow",
-                    "--disable-overwrite",
-                    "--output-dir",
-                    output_dir,
-                ],
-            )
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-
-            self.assertFalse(os.path.exists(output_file))
-            # test the original files are not overwritten
-            self.assertTrue(os.path.exists(output_dir))
-            self.assertTrue(os.path.exists(os.path.join(output_dir, "dummy.txt")))
-            dirs = os.listdir(self.config.checkpoint_job_dir)
-            target_output_dir = [d for d in dirs if d.startswith("debug_output_")]
-            self.assertEqual(len(target_output_dir), 1)
-            self.assertFalse(
-                os.path.exists(
-                    os.path.join(
-                        self.config.checkpoint_job_dir, target_output_dir[0], "profiling.html"
-                    )
-                )
-            )
-            self.assertTrue(
-                os.path.exists(
-                    os.path.join(
-                        self.config.checkpoint_job_dir, target_output_dir[0], "experiences.db"
-                    )
-                )
-            )
-            self.assertTrue(
-                os.path.exists(
-                    os.path.join(
-                        self.config.checkpoint_job_dir,
-                        target_output_dir[0],
-                        "log",
-                        "explorer_runner_0.log",
-                    )
-                ),
-            )
-        finally:
-            process.join(timeout=10)
-            process.terminate()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_load_plugins.assert_called_once_with()
+        mock_load.assert_called_once_with("dummy.yaml")
+        self.assertEqual(self.config.mode, "explore")
+        self.assertEqual(self.config.ray_namespace, DEBUG_NAMESPACE)
+        self.assertEqual(self.config.explorer.rollout_model.engine_num, 1)
+        mock_ray_init.assert_called_once_with(
+            namespace=DEBUG_NAMESPACE,
+            runtime_env={"env_vars": self.config.get_envs()},
+            ignore_reinit_error=True,
+        )
+        mock_runner_cls.assert_called_once_with(self.config, output_dir, True, True)
+        runner_instance.prepare.assert_called_once_with()
+        runner_instance.debug.assert_called_once_with()
+        self.assertEqual(mock_asyncio_run.call_count, 2)
+        self.assertEqual(
+            mock_asyncio_run.call_args_list,
+            [
+                mock.call(runner_instance.prepare.return_value),
+                mock.call(runner_instance.debug.return_value),
+            ],
+        )
 
     @mock.patch("trinity.manager.log_manager.LogManager")
     @mock.patch("trinity.cli.log.load_config")
@@ -455,21 +426,3 @@ class TestLauncherMain(unittest.TestCase):
             print("result.exc_info:", result.exc_info)
             self.assertNotEqual(result.exit_code, 0)
             self.assertEqual(result.exc_info[0], FileNotFoundError)
-
-
-def debug_inference_model_process():
-    config = get_template_config()
-    config.checkpoint_root_dir = get_checkpoint_path()
-    config.model.model_path = get_model_path()
-    config.check_and_update()
-    with mock.patch("trinity.cli.launcher.load_config", return_value=config):
-        runner.invoke(
-            launcher.app,
-            [
-                "debug",
-                "--config",
-                "dummy.yaml",
-                "--module",
-                "inference_model",
-            ],
-        )

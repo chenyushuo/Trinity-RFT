@@ -12,7 +12,6 @@ import numpy as np
 import ray
 
 from trinity.common.config import Config
-from trinity.common.models import InferenceModel
 from trinity.common.workflows import Task
 from trinity.explorer.workflow_runner import Status, WorkflowRunner
 from trinity.utils.log import get_logger
@@ -153,14 +152,14 @@ class RunnerWrapper:
     def __init__(
         self,
         runner_id: int,
-        rollout_model: InferenceModel,
-        auxiliary_models: List[InferenceModel],
+        rollout_model_id: int,
+        auxiliary_model_ids: List[int],
         config: Config,
     ):
         self.logger = get_logger(__name__)
         self.runner_id = runner_id
-        self.rollout_model = rollout_model
-        self.auxiliary_models = auxiliary_models
+        self.rollout_model_id = rollout_model_id
+        self.auxiliary_model_ids = auxiliary_model_ids
         self.config = config
         self.retry_times = config.explorer.max_retry_times
         self.timeout = config.explorer.max_timeout
@@ -181,19 +180,19 @@ class RunnerWrapper:
             )
             .remote(
                 self.config,
-                self.rollout_model,
-                self.auxiliary_models,
+                self.rollout_model_id,
+                self.auxiliary_model_ids,
                 self.runner_id,
             )
         )
-
-    async def prepare(self):
-        await self.runner.prepare.remote()
 
     async def update_state(self) -> None:
         """Get the runner state."""
         self.state = await self.runner.get_runner_state.remote()
         self.state["running_time"] = time.time() - self.state.get("begin_time", time.time())
+
+    async def prepare(self):
+        await self.runner.prepare.remote()
 
     async def run_with_retry(
         self,
@@ -320,13 +319,9 @@ class Scheduler:
     def __init__(
         self,
         config: Config,
-        rollout_model: List[InferenceModel],
-        auxiliary_models: Optional[List[List[InferenceModel]]] = None,
     ):
         self.logger = get_logger(__name__)
         self.config = config
-        self.rollout_model = rollout_model
-        self.auxiliary_models = auxiliary_models or []
         self.namespace = ray.get_runtime_context().namespace
         self.default_timeout = config.explorer.max_timeout * (config.explorer.max_retry_times + 1)
         self.max_retry_times = config.explorer.max_retry_times
@@ -340,7 +335,9 @@ class Scheduler:
             )
         self.running = False
 
-        self.runner_num = len(rollout_model) * config.explorer.runner_per_model
+        self.runner_num = (
+            config.explorer.rollout_model.engine_num * config.explorer.runner_per_model
+        )
         self.runners: Dict[int, RunnerWrapper] = dict()
         self.idle_runners: set[int] = set()  # runner_id of idle runners
         self.busy_runners: Dict[int, RunningTaskState] = dict()  # runner_id -> running state
@@ -377,10 +374,10 @@ class Scheduler:
     ):
         runner = RunnerWrapper(
             runner_id=runner_id,
-            rollout_model=self.rollout_model[runner_id % len(self.rollout_model)],
-            auxiliary_models=[
-                self.auxiliary_models[j][runner_id % len(self.auxiliary_models[j])]
-                for j in range(len(self.auxiliary_models))
+            rollout_model_id=runner_id % self.config.explorer.rollout_model.engine_num,
+            auxiliary_model_ids=[
+                runner_id % self.config.explorer.auxiliary_models[j].engine_num
+                for j in range(len(self.config.explorer.auxiliary_models))
             ],
             config=self.config,
         )
@@ -877,51 +874,6 @@ class Scheduler:
             or batch_id in self.pending_tasks
             or batch_id in self.running_tasks
         )
-
-    async def wait_all(
-        self, timeout: Optional[float] = None, clear_timeout_tasks: bool = True
-    ) -> None:
-        """Wait for all tasks to complete without poping results. If timeout reached, raise TimeoutError.
-
-        Args:
-            timeout (`float`): timeout in seconds. Raise `TimeoutError` when no new tasks is completed within timeout.
-            clear_timeout_tasks (`bool`): Whether to clear timeout tasks.
-        """
-        timeout = timeout or self.default_timeout
-        start_time = time.time()
-
-        self.logger.debug("Waiting for all tasks to complete...")
-        last_completed_count = 0
-        while time.time() - start_time < timeout:
-            has_pending = bool(self.pending_tasks)
-            has_running = bool(self.running_tasks)
-
-            if not has_pending and not has_running:
-                self.logger.debug("All tasks completed successfully")
-                return
-
-            completed_count = sum(len(tasks) for tasks in self.completed_tasks.values())
-            if completed_count != last_completed_count:
-                # flush timeout when new tasks are completed
-                start_time = time.time()
-                last_completed_count = completed_count
-
-            await asyncio.sleep(0.1)
-
-        pending_count = sum(len(tasks) for tasks in self.pending_tasks.values())
-        running_count = sum(len(futures) for futures in self.running_tasks.values())
-        error_msg = f"Timeout after {timeout} seconds. Still have {pending_count} pending tasks and {running_count} running tasks."
-        self.logger.error(error_msg)
-
-        if clear_timeout_tasks:
-            batch_ids_to_abort = self.pending_tasks.keys() | self.running_tasks.keys()
-            for batch_id in batch_ids_to_abort:
-                self._clear_timeout_tasks(batch_id)
-            asyncio.gather(
-                *[self._restart_runner(runner_id) for runner_id in self.busy_runners.keys()]
-            )
-
-        raise TimeoutError(error_msg)
 
     def get_key_state(self, key: str) -> Dict:
         """Get the scheduler state.

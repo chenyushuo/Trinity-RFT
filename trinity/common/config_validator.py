@@ -227,6 +227,8 @@ class RayClusterConfigValidator(ConfigValidator):
         """
         cluster = config.cluster
 
+        self._validate_multinode_inference_models(config)
+
         if config.explorer.rollout_model.engine_type == "external":
             return
 
@@ -293,6 +295,49 @@ class RayClusterConfigValidator(ConfigValidator):
                     )
                 cluster.trainer_node_num = cluster.trainer_gpu_num // cluster.gpu_per_node
                 cluster.trainer_gpu_num_per_node = cluster.gpu_per_node
+
+    def _validate_multinode_inference_models(self, config: Config) -> None:
+        """Validate per-engine multi-node inference settings.
+
+        For now, cross-node inference engines are only supported for vLLM-backed
+        rollout and auxiliary models.
+        """
+
+        model_configs = [config.explorer.rollout_model, *config.explorer.auxiliary_models]
+        for model_config in model_configs:
+            if model_config.nnodes == 1:
+                continue
+
+            if (
+                not model_config.engine_type.startswith("vllm")
+                and model_config.engine_type != "sglang"
+            ):
+                raise ValueError(
+                    "Multi-node inference is only supported for vLLM and SGLang engines."
+                )
+
+            if model_config.nnodes < 1:
+                raise ValueError(f"`nnodes` must be >= 1, but got {model_config.nnodes}.")
+
+            if model_config.nnodes > config.cluster.node_num:
+                raise ValueError(
+                    f"`nnodes` ({model_config.nnodes}) cannot exceed cluster.node_num "
+                    f"({config.cluster.node_num})."
+                )
+
+            if model_config.tensor_parallel_size % config.cluster.gpu_per_node != 0:
+                raise ValueError(
+                    f"tensor_parallel_size ({model_config.tensor_parallel_size}) must be an "
+                    f"integer multiple of cluster.gpu_per_node ({config.cluster.gpu_per_node}) "
+                    "when `nnodes > 1`, because each cross-node engine must occupy full nodes."
+                )
+
+            required_nnodes = model_config.tensor_parallel_size // config.cluster.gpu_per_node
+            if model_config.nnodes != required_nnodes:
+                raise ValueError(
+                    f"`nnodes` ({model_config.nnodes}) must equal tensor_parallel_size // "
+                    f"cluster.gpu_per_node ({required_nnodes}) when `nnodes > 1`."
+                )
 
 
 class AlgorithmConfigValidator(ConfigValidator):
