@@ -9,6 +9,7 @@ exceeds ``_MAPREDUCE_CONTEXT_THRESHOLD`` (30 000 chars) to mitigate
 import asyncio
 import json
 import logging
+import os
 import statistics
 from typing import Any
 
@@ -105,8 +106,23 @@ async def _evaluate_correctness_core(
 # Hallucination core (single-pass)
 # ---------------------------------------------------------------------------
 
-_MAPREDUCE_CONTEXT_THRESHOLD = 30_000
-_MAPREDUCE_CHUNK_TARGET = 30_000
+_MAPREDUCE_CONTEXT_THRESHOLD = 40_000
+_MAPREDUCE_CHUNK_TARGET = 40_000
+_MAPREDUCE_VERIFY_CONCURRENCY = max(
+    1, int(os.environ.get("EVAL_MR_VERIFY_CONCURRENCY", "8"))
+)
+_mr_verify_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_mr_verify_semaphore() -> asyncio.Semaphore:
+    """进程级 Semaphore，限制 MR-Verify 同时打 LLM 的 chunk 数。
+
+    懒初始化以绑定到当前 event loop；env ``EVAL_MR_VERIFY_CONCURRENCY`` 可调。
+    """
+    global _mr_verify_semaphore
+    if _mr_verify_semaphore is None:
+        _mr_verify_semaphore = asyncio.Semaphore(_MAPREDUCE_VERIFY_CONCURRENCY)
+    return _mr_verify_semaphore
 
 
 async def _evaluate_hallucination_core_once(
@@ -262,6 +278,9 @@ def _mr_keyword_search(
         cid = claim["id"]
         hits: list[str] = []
         for kw in claim.get("keywords", []):
+            if kw is None:
+                continue
+            kw = str(kw).strip()
             if not kw:
                 continue
             for ei, (header, content) in enumerate(entries, 1):
@@ -369,15 +388,24 @@ async def _mr_verify_all_chunks(
     *,
     max_retries: int = 2,
 ) -> list[list[dict]]:
-    """并发验证所有 chunk。
+    """并发验证所有 chunk（受 ``_MAPREDUCE_VERIFY_CONCURRENCY`` 节流）。
 
     使用 ``return_exceptions=True``：单个 chunk 即便绕过了内部 try/except 仍冒泡
     出异常，也只让该 chunk 退化为空 verdict，不会拖垮整批。
+
+    通过模块级 Semaphore 限制同时打 LLM 的 chunk 数，避免长上下文场景下一次性
+    把几十个请求灌给 dashscope 触发限流；可通过 env ``EVAL_MR_VERIFY_CONCURRENCY``
+    覆盖默认值（8）。
     """
-    tasks = [
-        _mr_verify_chunk(claims, ch, i + 1, len(chunks), max_retries=max_retries)
-        for i, ch in enumerate(chunks)
-    ]
+    sem = _get_mr_verify_semaphore()
+
+    async def _guarded(idx: int, ch: str) -> list[dict]:
+        async with sem:
+            return await _mr_verify_chunk(
+                claims, ch, idx + 1, len(chunks), max_retries=max_retries
+            )
+
+    tasks = [_guarded(i, ch) for i, ch in enumerate(chunks)]
     raw = await asyncio.gather(*tasks, return_exceptions=True)
     out: list[list[dict]] = []
     for i, r in enumerate(raw):
