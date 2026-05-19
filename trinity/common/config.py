@@ -776,6 +776,7 @@ class TrainerConfig:
     # trainer configs
     grad_clip: float = 1.0
     use_dynamic_bsz: bool = True
+    use_remove_padding: bool = True
     # if None, automatically set to ceil(2 * model.max_model_len / ulysses_sequence_parallel_size)
     max_token_len_per_gpu: Optional[int] = None
     ulysses_sequence_parallel_size: int = 1  # sp size

@@ -102,7 +102,7 @@ class ModelWrapperTest(VLLMTestBase):
         self.model_wrapper = self.engines[0]
 
     async def test_generate(self):
-        self.assertEqual(self.model_wrapper.model_name, self.config.model.model_path)
+        self.assertEqual(self.model_wrapper.model_path, self.config.model.model_path)
         prompts = ["Hello, world!", "Hello, my name is"]
         n = self.config.algorithm.repeat_times
         if self.use_async:

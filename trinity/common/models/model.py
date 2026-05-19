@@ -334,6 +334,7 @@ class ModelWrapper:
         self.config: InferenceModelConfig = config
         if self.config.model_path is None:
             raise ValueError("model_path must be provided in the config.")
+        self._model_path = self.config.model_path
         self._engine_type = config.engine_type
         self._generate_kwargs = {
             "temperature": self.config.temperature,
@@ -475,23 +476,9 @@ class ModelWrapper:
         """Get the version of the model."""
         return await self.model.get_model_version.remote()
 
-    def fetch_model_path(self) -> str:
-        """
-        Returns the path to the model files based on the current engine type.
-
-        - For 'vllm' engine: returns the model path from the configuration (`config.model_path`)
-        - For 'tinker' engine: returns the path to the most recent sampler weights
-        """
-        return ray.get(self.model.get_model_path.remote())
-
-    async def fetch_model_path_async(self) -> str:
-        """
-        Returns the path to the model files based on the current engine type.
-
-        - For 'vllm' engine: returns the model path from the configuration (`config.model_path`)
-        - For 'tinker' engine: returns the path to the most recent sampler weights
-        """
-        return await self.model.get_model_path.remote()
+    @property
+    def model_path(self) -> str:
+        return self._model_path
 
     @property
     def model_name(self) -> str:
@@ -705,6 +692,9 @@ class ModelWrapper:
     ) -> None:
         """Sync the model weights"""
         await self.model.sync_model_weights.remote(model_version, method, timeout=timeout)
+        if self._engine_type == "tinker":
+            # update the model path after syncing weights for tinker engine
+            self._model_path = await self.model.get_model_path.remote()
 
     def extract_experience_from_history(self, clear_history: bool = True) -> List[Experience]:
         """Extract experiences from the history."""

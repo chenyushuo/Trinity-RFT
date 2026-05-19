@@ -160,7 +160,7 @@ class TestSGLangOpenAIAPI(RayUnittestBaseAsync):
         return contents
 
     async def test_chat_completions(self):
-        self.assertEqual(self.model_wrapper.model_name, self.config.model.model_path)
+        self.assertEqual(self.model_wrapper.model_path, self.config.model.model_path)
         self.assertIsNotNone(self.model_wrapper.api_address)
 
         messages = [

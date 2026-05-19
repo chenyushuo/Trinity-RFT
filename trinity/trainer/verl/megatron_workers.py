@@ -762,7 +762,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             torch.cuda.empty_cache()
 
             if torch.distributed.get_rank() == 0:
-                master_address, master_port = self.get_availale_master_addr_port()
+                master_address, master_port = self.get_available_master_addr_port()
                 world_size = self.config.synchronizer.explorer_world_size + 1
                 self.logger.info(
                     f"Trainer init_process_group {master_address}:{master_port} ({world_size})."

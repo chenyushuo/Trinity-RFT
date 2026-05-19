@@ -38,7 +38,7 @@ class ActorModel:
     external_lib: Optional[str] = None
     override_config: Dict[str, Any] = field(default_factory=dict)
     enable_gradient_checkpointing: bool = True
-    use_remove_padding: bool = True
+    use_remove_padding: Optional[bool] = None
     use_fused_kernels: bool = False
     fused_kernel_options: FusedKernelOptions = field(default_factory=FusedKernelOptions)
     custom_chat_template: Optional[str] = None
@@ -249,7 +249,7 @@ class CriticModel:
     external_lib: Optional[str] = None
     trust_remote_code: bool = False  # Whether to enable loading a remote code model
     enable_gradient_checkpointing: bool = True
-    use_remove_padding: bool = True
+    use_remove_padding: Optional[bool] = None
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
     freeze_vision_tower: bool = False
 
@@ -294,7 +294,7 @@ class _RewardModel:
     input_tokenizer: Optional[str] = None
     path: str = ""
     external_lib: Optional[str] = None
-    use_remove_padding: bool = False
+    use_remove_padding: Optional[bool] = None
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
 
 
@@ -539,7 +539,6 @@ class veRLConfig:
         rollout_config.n = config.algorithm.repeat_times
         for actor_attr, trainer_attr in [
             ("grad_clip",) * 2,
-            ("use_dynamic_bsz",) * 2,
             ("fix_actor_microbatch_loss_scale",) * 2,
             ("ulysses_sequence_parallel_size",) * 2,
             ("ppo_max_token_len_per_gpu", "max_token_len_per_gpu"),
@@ -595,7 +594,6 @@ class veRLConfig:
         critic_optim.total_training_steps = self.trainer.total_training_steps
         for critic_attr, trainer_attr in [
             ("grad_clip",) * 2,
-            ("use_dynamic_bsz",) * 2,
             ("ulysses_sequence_parallel_size",) * 2,
             ("strategy", "trainer_strategy"),
             ("ppo_max_token_len_per_gpu", "max_token_len_per_gpu"),
@@ -685,6 +683,20 @@ class veRLConfig:
             ("log_prob_max_token_len_per_gpu", "ppo_max_token_len_per_gpu"),
         ]:
             set_if_none(rollout_config, rollout_attr, getattr(actor_config, actor_attr))
+
+        # set use_dynamic_bsz
+        use_dynamic_bsz = config.trainer.use_dynamic_bsz
+        self.actor_rollout_ref.actor.use_dynamic_bsz = use_dynamic_bsz
+        self.actor_rollout_ref.actor.megatron.use_dynamic_bsz = use_dynamic_bsz
+        self.actor_rollout_ref.ref.megatron.use_dynamic_bsz = use_dynamic_bsz
+        self.critic.use_dynamic_bsz = use_dynamic_bsz
+        self.critic.megatron.use_dynamic_bsz = use_dynamic_bsz
+        # set use_remove_padding
+        use_remove_padding = config.trainer.use_remove_padding
+        self.actor_rollout_ref.model.use_remove_padding = use_remove_padding
+        self.actor_rollout_ref.actor.megatron.use_remove_padding = use_remove_padding
+        self.actor_rollout_ref.ref.megatron.use_remove_padding = use_remove_padding
+        self.critic.megatron.use_remove_padding = use_remove_padding
 
         # TODO: check other fields
         self.enable_preview = config.trainer.enable_preview

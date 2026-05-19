@@ -23,6 +23,7 @@ from tests.tools import (
     RayUnittestBaseAsync,
     TensorBoardParser,
     get_alternative_vision_language_model_path,
+    get_api_model_path,
     get_checkpoint_path,
     get_lora_config,
     get_model_path,
@@ -240,10 +241,11 @@ class TestStepAheadAsyncRL(BaseTrainerCase):
 
 
 @parameterized_class(
-    ("fsdp_strategy", "offloading", "engine_type"),
+    ("strategy", "offloading", "engine_type"),
     [
-        ("fsdp", False, "vllm"),
+        ("megatron", False, "vllm"),
         ("fsdp2", False, "vllm"),
+        ("megatron", True, "sglang"),
         ("fsdp2", True, "sglang"),
     ],
 )
@@ -251,6 +253,7 @@ class TestTrainerGSM8K(BaseTrainerCase):
     def test_trainer(self):
         """Test GSM8K."""
         # test both mode
+        self.config.model.model_path = get_api_model_path()
         self.config.algorithm.algorithm_type = "grpo"
         self.config.algorithm.repeat_times = 4
         self.config.algorithm.advantage_fn = "grpo"
@@ -267,12 +270,18 @@ class TestTrainerGSM8K(BaseTrainerCase):
         self.config.explorer.rollout_model.engine_type = self.engine_type
         self.config.buffer.total_epochs = 1
         self.config.buffer.explorer_input.taskset = get_unittest_dataset_config("gsm8k")
-        self.config.trainer.trainer_strategy = self.fsdp_strategy
+        self.config.trainer.trainer_strategy = self.strategy
+        if self.strategy == "megatron":
+            # Megatron not support packing for now, so we need to set the following configs
+            # to make sure the input is not packed.
+            # Remove after we support packing in Megatron.
+            self.config.trainer.use_dynamic_bsz = False
+            self.config.trainer.use_remove_padding = False
         self.config.check_and_update()
         self.config.trainer.trainer_config.trainer.max_actor_ckpt_to_keep = 2
         actor_rollout_ref = self.config.trainer.trainer_config.actor_rollout_ref
         actor_rollout_ref.actor.optim.lr = 1e-5
-        if self.fsdp_strategy == "fsdp":
+        if self.strategy == "fsdp":
             actor_rollout_ref.actor.fsdp_config.param_offload = self.offloading
             actor_rollout_ref.actor.fsdp_config.optimizer_offload = self.offloading
             actor_rollout_ref.ref.fsdp_config.param_offload = self.offloading
