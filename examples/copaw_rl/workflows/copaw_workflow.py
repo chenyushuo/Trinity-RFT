@@ -128,7 +128,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
         dashscope_api_key = self.task.workflow_args["dashscope_api_key"]
         task_id = self.task.raw_task["task_id"]
         api_server_url = f"{self.model.api_address}/v1"
-        model_path = self.model.model_path
+        model_path = self.model.model_name
         try:
             dataset = run_workflow(
                 sandbox,

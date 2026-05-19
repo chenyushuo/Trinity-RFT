@@ -111,6 +111,8 @@ class FSDPCheckpointManager(OldFSDPCheckpointManager):
         Args:
             global_step (int): The current training step number.
         """
+        if global_step == 0:
+            return
         assert self.synchronizer is not None
         state_dict = get_fsdp_full_state_dict(self.model, offload_to_cpu=True, rank0_only=True)
         self._upload_state_dict(state_dict, global_step)

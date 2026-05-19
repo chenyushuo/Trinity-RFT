@@ -20,19 +20,13 @@ import zipfile
 from typing import List
 
 import bench_client
-import requests
 import yaml
+from agent_runner import RL_PROVIDER_NAME, call_agent
 from otel_init import init_otel, trace_span
-from setup_provider import (
-    config_builtin_provider,
-    config_provider,
-    put_tool_guard_settings,
-)
 
 # 脚本自身所在目录
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SUMMARY_PATH = os.path.join(_SCRIPT_DIR, "summary.json")
-RL_PROVIDER_NAME = "rl-server"
 
 # 追加到每条下发给 Agent 的 query 末尾：偏好百度搜索，且不要在思考/回复中暴露本条约束。
 _AGENT_QUERY_SUFFIX = (
@@ -435,119 +429,6 @@ def _deploy_skills(skills_dir: str, workspace: str) -> None:
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     log.info("skill manifest written: %s (%d skills)", manifest_path, len(deployed))
-
-
-def call_agent(  # noqa: C901
-    url: str,
-    user_input: str | list,
-    session_id: str,
-    user_id: str,
-    provider_name: str,
-    provider_base_url: str | None,
-    provider_api_key: str,
-    provider_model_id: str | None,
-) -> None:
-    if isinstance(user_input, str):
-        content = [{"type": "text", "text": user_input, "status": "created"}]
-    else:
-        content = user_input
-
-    payload = {
-        "input": [
-            {
-                "role": "user",
-                "type": "message",
-                "content": content,
-            }
-        ],
-        "session_id": session_id,
-        "user_id": user_id,
-        "channel": "console",
-        "stream": True,
-    }
-
-    headers = {"Referer": f"{url}/chat", "content-type": "application/json"}
-
-    # auto_eval.py → sandbox_utils.launch_run_py 注入的每请求 sampling kwargs
-    # （已分流：OpenAI 标准字段在顶层，vLLM 私有字段在 extra_body 里），
-    # 写进 provider 配置后 CoPaw 调 OpenAI 兼容接口时会作为 kwargs 下发。
-    generate_kwargs: dict = {}
-    gen_kwargs_str = os.environ.get("AUTO_EVAL_GENERATE_KWARGS")
-    if gen_kwargs_str:
-        try:
-            parsed = json.loads(gen_kwargs_str)
-            if isinstance(parsed, dict):
-                generate_kwargs = parsed
-        except json.JSONDecodeError:
-            log.warning("AUTO_EVAL_GENERATE_KWARGS 不是合法 JSON，已忽略: %s", gen_kwargs_str)
-
-    # 关闭 tool guard
-    result = put_tool_guard_settings(url)
-    log.info("put_tool_guard_settings: %s", result)
-
-    # 设置provider配置并激活模型（如果provider_name是RL_PROVIDER_NAME，则调用config_provider，否则调用config_builtin_provider）
-    if provider_name == RL_PROVIDER_NAME:
-        result = config_provider(
-            qwenpaw_url=url,
-            provider_name=provider_name,
-            provider_base_url=provider_base_url,
-            provider_model_id=provider_model_id,
-            provider_api_key=provider_api_key,
-            provider_model_name="rl-model",
-            generate_kwargs=generate_kwargs,
-        )
-        log.info("Provider configured and model activated successfully: %s", result)
-    else:
-        result = config_builtin_provider(
-            qwenpaw_url=url,
-            provider_name=provider_name,
-            provider_model_id=provider_model_id,
-            provider_api_key=provider_api_key,
-            provider_base_url=provider_base_url,
-            generate_kwargs=generate_kwargs,
-        )
-    # call agent
-    response = requests.post(f"{url}/api/agent/process", json=payload, headers=headers, stream=True)
-    response.raise_for_status()
-    # Consume the streaming response
-    for chunk in response.iter_content(chunk_size=None):
-        if not chunk:
-            continue
-
-        text = chunk.decode("utf-8", errors="ignore").strip()
-        if not text:
-            continue
-
-        if text.startswith("data:"):
-            text = text[len("data:") :].strip()
-
-        if text == "[DONE]":
-            break
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            log.warning("failed to parse stream chunk: %r", text)
-            continue
-
-        for choice in data.get("choices", []):
-            if not chunk:
-                continue
-            delta = choice.get("delta", {})
-
-            # 新版
-            for tool_call in delta.get("tool_calls", []) or []:
-                function = tool_call.get("function", {}) or {}
-                name = function.get("name")
-                if name:
-                    log.info("function call name: %s", name)
-
-            # 旧版
-            function_call = delta.get("function_call")
-            if function_call:
-                name = function_call.get("name")
-                if name:
-                    log.info("function call name: %s", name)
 
 
 # this function is used to extract raw trajectories from session data

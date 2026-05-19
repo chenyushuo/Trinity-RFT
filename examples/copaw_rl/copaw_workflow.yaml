@@ -4,7 +4,7 @@ group: ${oc.env:EXP_DATE}-${oc.env:EXP_SOURCE}
 name: ${oc.env:EXP_NAME}
 checkpoint_root_dir: ${oc.env:TRINITY_CHECKPOINT_ROOT_DIR,./checkpoints}
 algorithm:
-  algorithm_type: grpo
+  algorithm_type: ${oc.env:ALGORITHM_TYPE,grpo}
   repeat_times: 8
   optimizer:
     lr: ${oc.env:LR,1e-6}
@@ -92,6 +92,7 @@ explorer:
     gpu_memory_utilization: 0.85
     dtype: bfloat16
     seed: 42
+    base_port: 25000
     enable_openai_api: true
     enable_auto_tool_choice: true
     reasoning_parser: qwen3

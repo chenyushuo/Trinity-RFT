@@ -108,9 +108,7 @@ async def _evaluate_correctness_core(
 
 _MAPREDUCE_CONTEXT_THRESHOLD = 40_000
 _MAPREDUCE_CHUNK_TARGET = 40_000
-_MAPREDUCE_VERIFY_CONCURRENCY = max(
-    1, int(os.environ.get("EVAL_MR_VERIFY_CONCURRENCY", "8"))
-)
+_MAPREDUCE_VERIFY_CONCURRENCY = max(1, int(os.environ.get("EVAL_MR_VERIFY_CONCURRENCY", "8")))
 _mr_verify_semaphore: asyncio.Semaphore | None = None
 
 
@@ -401,9 +399,7 @@ async def _mr_verify_all_chunks(
 
     async def _guarded(idx: int, ch: str) -> list[dict]:
         async with sem:
-            return await _mr_verify_chunk(
-                claims, ch, idx + 1, len(chunks), max_retries=max_retries
-            )
+            return await _mr_verify_chunk(claims, ch, idx + 1, len(chunks), max_retries=max_retries)
 
     tasks = [_guarded(i, ch) for i, ch in enumerate(chunks)]
     raw = await asyncio.gather(*tasks, return_exceptions=True)

@@ -208,7 +208,7 @@ def run_with_reconnect(sandbox: Sandbox, cmd, envs, logger, max_retries=5):
         cmd,
         background=True,
         envs=envs,
-        timeout=1200,  # 30 min; was 3600
+        timeout=1000,  # about 16 min; was 3600
         request_timeout=1800,
     )
     pid = handle.pid
@@ -580,7 +580,8 @@ if __name__ == "__main__":
             "pip uninstall qwenpaw -y && "
             "pip install qwenpaw==v1.1.7 && "
             "pip install oss2 pytest py-openjudge pytest-asyncio && "
-            "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/model_trajectory.patch && "
+            "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/react_agent.patch && "
+            "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/tools/browser_control.py < /root/patch/browser_control.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_openai_model.py < /root/patch/openai_model.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_model_response.py < /root/patch/model_response.patch && "
             "apt-get update && "

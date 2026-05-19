@@ -2,8 +2,8 @@
 """Base Model Class"""
 
 import asyncio
+import builtins
 import copy
-import random
 import socket
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -27,9 +27,10 @@ if TYPE_CHECKING:
 class InferenceModel(ABC):
     """A model for high performance for rollout inference."""
 
-    def __init__(self, config: InferenceModelConfig) -> None:
+    def __init__(self, config: InferenceModelConfig, name: Optional[str] = None) -> None:
         self.config = config
-        self.logger = get_logger(__name__)
+        self.logger = get_logger(name or __name__, in_ray_actor=True)
+        builtins.print = lambda *args, **kwargs: self.logger.info(" ".join(map(str, args)))
         self._prepared = False
         self.master_addr: Optional[str] = None
         self.master_port: Optional[int] = None
@@ -95,9 +96,13 @@ class InferenceModel(ABC):
             random_port: Whether to skip the configured ``base_port`` convention and
                 allocate an ephemeral port on the current node directly.
         """
-        address = ray.util.get_node_ip_address()
+        # TODO: workaround for ray.util.get_node_ip_address() in DLC
+        # address = ray.util.get_node_ip_address()
+        import subprocess
+
+        address = subprocess.getoutput("hostname -I").strip().split()[0]
         if not random_port and self.config.base_port is not None:
-            configured_port = self.config.base_port + self.config.engine_id
+            configured_port = self.config.base_port + (self.config.engine_id % 8)  # TODO
             with socket.socket() as s:
                 try:
                     s.bind(("", configured_port))
@@ -142,8 +147,8 @@ class InferenceModel(ABC):
 class BaseInferenceModel(InferenceModel):
     """Base class for inference models containing common logic."""
 
-    def __init__(self, config: InferenceModelConfig) -> None:
-        super().__init__(config)
+    def __init__(self, config: InferenceModelConfig, name: Optional[str] = None) -> None:
+        super().__init__(config, name)
         self.tokenizer = None
         self.chat_template = None
         if self.config.chat_template:

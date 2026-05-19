@@ -59,9 +59,6 @@ vllm = [
 sglang = [
     "sglang==0.5.11",
 ]
-sglang = [
-    "sglang==0.5.11",
-]
 data = [
     "py-data-juicer>=1.4.3"
 ]
