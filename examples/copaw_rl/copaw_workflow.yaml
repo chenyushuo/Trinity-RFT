@@ -114,7 +114,7 @@ synchronizer:
   sync_style: "trainer_driven"
   sync_offset: 0
 trainer:
-  trainer_strategy: fsdp2
+  trainer_strategy: ${oc.env:TRAINER_STRATEGY,fsdp2}
   total_steps: ${oc.env:TOTAL_STEPS,1000}
   save_interval: 20
   grad_clip: 1.0
@@ -130,5 +130,46 @@ trainer:
           impl_backend: torch
       actor:
         freeze_vision_tower: ${oc.env:FREEZE_VISION_TOWER,false}
+        ppo_micro_batch_size_per_gpu: ${oc.env:MICRO_BATCH_SIZE_PER_GPU,1}
+        megatron:
+          tensor_model_parallel_size: ${oc.env:TP_SIZE,1}
+          expert_model_parallel_size: ${oc.env:EP_SIZE,1}
+          pipeline_model_parallel_size: ${oc.env:PP_SIZE,1}
+          context_parallel_size: ${oc.env:SP_SIZE,1}
+          # offload settings
+          param_offload: false
+          grad_offload: false
+          optimizer_offload: false
+          # whether to use mbridge to import/export parameters
+          use_mbridge: true
+          # Use Megatron checkpoint
+          use_dist_checkpointing: false
+          dist_checkpointing_path: null
+          # recompute settings
+          override_transformer_config:
+            recompute_granularity: full
+            recompute_method: uniform
+            recompute_num_layers: 1
+      ref:
+        log_prob_micro_batch_size_per_gpu: ${oc.env:MICRO_BATCH_SIZE_PER_GPU,1}
+        megatron:
+          tensor_model_parallel_size: ${oc.env:TP_SIZE,1}
+          expert_model_parallel_size: ${oc.env:EP_SIZE,1}
+          pipeline_model_parallel_size: ${oc.env:PP_SIZE,1}
+          context_parallel_size: ${oc.env:SP_SIZE,1}
+          # offload settings
+          param_offload: false
+          grad_offload: false
+          optimizer_offload: false
+          # whether to use mbridge to import/export parameters
+          use_mbridge: true
+          # Use Megatron checkpoint
+          use_dist_checkpointing: false
+          dist_checkpointing_path: null
+          # recompute settings
+          override_transformer_config:
+            recompute_granularity: full
+            recompute_method: uniform
+            recompute_num_layers: 1
 monitor:
   monitor_type: wandb
