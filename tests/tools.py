@@ -23,6 +23,7 @@ from trinity.common.constants import (
 )
 
 API_MODEL_PATH_ENV_VAR = "TRINITY_API_MODEL_PATH"
+MOE_MODEL_PATH_ENV_VAR = "TRINITY_MOE_MODEL_PATH"
 VLM_MODEL_PATH_ENV_VAR = "TRINITY_VLM_MODEL_PATH"
 ALTERNATIVE_VLM_MODEL_PATH_ENV_VAR = "TRINITY_ALTERNATIVE_VLM_MODEL_PATH"
 SFT_DATASET_PATH_ENV_VAR = "TRINITY_SFT_DATASET_PATH"
@@ -207,6 +208,15 @@ def get_api_model_path() -> str:
     if not path:
         raise EnvironmentError(
             f"Please set `export {API_MODEL_PATH_ENV_VAR}=<your_api_model_checkpoint_dir>` before running this test."
+        )
+    return path
+
+
+def get_moe_model_path() -> str:
+    path = os.environ.get(MOE_MODEL_PATH_ENV_VAR)
+    if not path:
+        raise EnvironmentError(
+            f"Please set `export {MOE_MODEL_PATH_ENV_VAR}=<your_moe_model_checkpoint_dir>` before running this test."
         )
     return path
 

@@ -8,7 +8,7 @@ import ray
 import torch
 from openai import BadRequestError
 from parameterized import parameterized_class
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from tests.tools import (
     CHAT_TEMPLATE,
@@ -16,6 +16,7 @@ from tests.tools import (
     RayUnittestBaseAsync,
     get_api_model_path,
     get_model_path,
+    get_moe_model_path,
     get_template_config,
 )
 from trinity.common.config import Config
@@ -51,6 +52,38 @@ def clone_wrapper(wrapper: ModelWrapper, enable_history: bool) -> ModelWrapper:
     )
 
 
+def _get_text_config(model_path: str):
+    hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    return getattr(hf_config, "text_config", hf_config)
+
+
+def _count_moe_layers(hf_config) -> int:
+    layers_block_type = getattr(hf_config, "layers_block_type", None)
+    if layers_block_type is not None:
+        return layers_block_type.count("moe")
+    num_layers = int(hf_config.num_hidden_layers)
+    mlp_only_layers = getattr(hf_config, "mlp_only_layers", None) or []
+    decoder_sparse_step = getattr(hf_config, "decoder_sparse_step", 1) or 1
+    if decoder_sparse_step > 1:
+        return sum(
+            1
+            for layer_id in range(num_layers)
+            if (layer_id + 1) % decoder_sparse_step == 0 and layer_id not in mlp_only_layers
+        )
+    return num_layers - sum(1 for layer_id in mlp_only_layers if 0 <= layer_id < num_layers)
+
+
+def _assert_routed_experts_shape(test_case, exp, expected_layers: int, expected_topk: int):
+    test_case.assertIsNotNone(exp.routed_experts)
+    routed_experts = exp.routed_experts
+    test_case.assertEqual(routed_experts.dtype, torch.uint8)
+    test_case.assertEqual(routed_experts.ndim, 3)
+    test_case.assertEqual(
+        tuple(routed_experts.shape),
+        (len(exp.tokens) - 1, expected_layers, expected_topk),
+    )
+
+
 class VLLMTestBase(RayUnittestBaseAsync):
     async def asyncTearDown(self):
         wrappers = []
@@ -76,11 +109,12 @@ class VLLMTestBase(RayUnittestBaseAsync):
         "repeat_times",
         "enable_history",
         "use_async",
+        "enable_return_routed_experts",
     ),
     [
-        (2, 2, 1, 1, True, False),
-        (1, 2, 1, 1, False, True),
-        (4, 1, 2, 4, True, True),
+        (2, 2, 1, 1, True, False, False),
+        (1, 2, 1, 1, False, True, False),
+        (4, 1, 2, 4, True, True, True),
     ],
 )
 class ModelWrapperTest(VLLMTestBase):
@@ -88,7 +122,16 @@ class ModelWrapperTest(VLLMTestBase):
         # configure the model
         self.config = get_template_config()
         self.config.mode = "explore"
-        self.config.model.model_path = get_model_path()
+        self.config.model.model_path = (
+            get_model_path() if not self.enable_return_routed_experts else get_moe_model_path()
+        )
+        if self.enable_return_routed_experts:
+            self.text_config = _get_text_config(self.config.model.model_path)
+            self.expected_routed_experts_layers = _count_moe_layers(self.text_config)
+            self.expected_routed_experts_topk = int(self.text_config.num_experts_per_tok)
+        else:
+            self.expected_routed_experts_layers = 0
+            self.expected_routed_experts_topk = 0
         self.config.model.custom_chat_template = CHAT_TEMPLATE
         self.config.explorer.rollout_model.engine_num = self.engine_num
         self.config.explorer.rollout_model.nnodes = self.nnodes
@@ -96,12 +139,13 @@ class ModelWrapperTest(VLLMTestBase):
         self.config.algorithm.repeat_times = self.repeat_times
         self.config.explorer.rollout_model.enable_history = self.enable_history
         self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
+        self.config.algorithm.enable_router_replay = self.enable_return_routed_experts
         self.config.check_and_update()
 
         self.engines, self.auxiliary_engines = await create_test_models(self.config)
         self.model_wrapper = self.engines[0]
 
-    async def test_generate(self):
+    async def test_generate(self):  # noqa: C901
         self.assertEqual(self.model_wrapper.model_path, self.config.model.model_path)
         prompts = ["Hello, world!", "Hello, my name is"]
         n = self.config.algorithm.repeat_times
@@ -112,6 +156,14 @@ class ModelWrapperTest(VLLMTestBase):
         else:
             generate_results = self.model_wrapper.generate(prompts, n=n, temperature=1.0)
         self.assertEqual(len(generate_results), len(prompts) * n)
+        if self.enable_return_routed_experts:
+            for exp in generate_results:
+                _assert_routed_experts_shape(
+                    self,
+                    exp,
+                    self.expected_routed_experts_layers,
+                    self.expected_routed_experts_topk,
+                )
         if self.config.explorer.rollout_model.enable_history:
             history_experiences = self.model_wrapper.extract_experience_from_history(
                 clear_history=False
@@ -122,6 +174,13 @@ class ModelWrapperTest(VLLMTestBase):
                 self.assertEqual(exp.tokens.tolist(), history_exp.tokens.tolist())
                 self.assertEqual(exp.prompt_length, history_exp.prompt_length)
                 self.assertEqual(exp.logprobs.tolist(), history_exp.logprobs.tolist())
+                if self.enable_return_routed_experts:
+                    _assert_routed_experts_shape(
+                        self,
+                        history_exp,
+                        self.expected_routed_experts_layers,
+                        self.expected_routed_experts_topk,
+                    )
         else:
             with self.assertRaises(ValueError):
                 self.model_wrapper.extract_experience_from_history(clear_history=False)
@@ -139,6 +198,14 @@ class ModelWrapperTest(VLLMTestBase):
         else:
             results = self.model_wrapper.chat(messages, n=n, temperature=1.0)
         self.assertEqual(len(results), n)
+        if self.enable_return_routed_experts:
+            for exp in results:
+                _assert_routed_experts_shape(
+                    self,
+                    exp,
+                    self.expected_routed_experts_layers,
+                    self.expected_routed_experts_topk,
+                )
         if self.config.explorer.rollout_model.enable_history:
             history_experiences = self.model_wrapper.extract_experience_from_history()
             self.assertEqual(len(history_experiences) - len(generate_results), len(results))
@@ -147,6 +214,13 @@ class ModelWrapperTest(VLLMTestBase):
                 self.assertEqual(exp.tokens.tolist(), history_exp.tokens.tolist())
                 self.assertEqual(exp.prompt_length, history_exp.prompt_length)
                 self.assertEqual(exp.logprobs.tolist(), history_exp.logprobs.tolist())
+                if self.enable_return_routed_experts:
+                    _assert_routed_experts_shape(
+                        self,
+                        history_exp,
+                        self.expected_routed_experts_layers,
+                        self.expected_routed_experts_topk,
+                    )
         for result in results:
             self.assertTrue(torch.any(result.logprobs != 0))
         if self.use_async:

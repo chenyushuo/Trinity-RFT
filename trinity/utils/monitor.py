@@ -2,7 +2,7 @@
 
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Union
+from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -39,50 +39,6 @@ MONITOR = Registry(
 )
 
 
-def gather_metrics(
-    metric_list: List[Dict], prefix: str, output_stats: List[str] = ["mean", "max", "min"]
-) -> Dict:
-    if not metric_list:
-        return {}
-    try:
-        df = pd.DataFrame(metric_list)
-        numeric_df = df.select_dtypes(include=[np.number])
-        stats_df = numeric_df.agg(output_stats)
-        metric = {}
-        for col in stats_df.columns:
-            for stats in output_stats:
-                metric[f"{prefix}/{col}/{stats}"] = stats_df.loc[stats, col].item()
-        return metric
-    except Exception as e:
-        raise ValueError(f"Failed to gather metrics: {e}") from e
-
-
-def gather_eval_metrics(
-    metric_list: List[Dict],
-    prefix: str,
-    output_stats: List[str] = ["mean", "max", "min", "std"],
-    detailed_stats: bool = False,
-) -> Dict:
-    if not metric_list:
-        return {}
-    try:
-        df = pd.DataFrame(metric_list)
-        numeric_df = df.select_dtypes(include=[np.number])
-        metric = {}
-        for col in numeric_df.columns:
-            if detailed_stats:
-                stats_df = numeric_df[[col]].agg(output_stats)
-                for stats in output_stats:
-                    metric[f"{prefix}/{col}/{stats}"] = stats_df.loc[stats, col].item()
-            else:
-                # only return the mean of the column
-                metric[f"{prefix}/{col}"] = numeric_df[col].mean()
-
-        return metric
-    except Exception as e:
-        raise ValueError(f"Failed to gather eval metrics: {e}") from e
-
-
 class Monitor(ABC):
     """Monitor"""
 
@@ -112,25 +68,6 @@ class Monitor(ABC):
 
     def __del__(self) -> None:
         self.close()
-
-    def calculate_metrics(
-        self, data: dict[str, Union[List[float], float]], prefix: Optional[str] = None
-    ) -> dict[str, float]:
-        metrics = {}
-        for key, val in data.items():
-            if prefix is not None:
-                key = f"{prefix}/{key}"
-
-            if isinstance(val, List):
-                if len(val) > 1:
-                    metrics[f"{key}/mean"] = np.mean(val)
-                    metrics[f"{key}/max"] = np.amax(val)
-                    metrics[f"{key}/min"] = np.amin(val)
-                elif len(val) == 1:
-                    metrics[key] = val[0]
-            else:
-                metrics[key] = val
-        return metrics
 
     @classmethod
     def default_args(cls) -> Dict:

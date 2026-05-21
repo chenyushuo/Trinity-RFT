@@ -7,7 +7,7 @@ import torch
 from trinity.algorithm.advantage_fn.advantage_fn import AdvantageFn
 from trinity.buffer.operators import ExperienceOperator
 from trinity.common.experience import Experience, group_by
-from trinity.utils.monitor import gather_metrics
+from trinity.utils.metrics import aggregate_metrics
 
 
 class StepWiseGRPOAdvantageFn(AdvantageFn, ExperienceOperator):
@@ -168,7 +168,7 @@ class StepWiseGRPOAdvantageFn(AdvantageFn, ExperienceOperator):
                 cnt += len(exps)
                 result_exps.extend(exps)
 
-        metrics = gather_metrics(metric_list, "group_advantages")
+        metrics = aggregate_metrics(metric_list, prefix="group_advantages")
         metrics["experience_count"] = cnt
         metrics["filtered_count"] = filtered_count
 

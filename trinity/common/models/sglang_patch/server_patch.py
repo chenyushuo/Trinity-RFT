@@ -263,6 +263,7 @@ def get_api_server(
     trust_remote_code: bool,
     context_length: Optional[int],
     enable_multimodal: bool,
+    enable_return_routed_experts: bool,
     api_key: str,
     nnodes: int,
     node_rank: int,
@@ -286,6 +287,7 @@ def get_api_server(
         trust_remote_code=trust_remote_code,
         context_length=context_length,
         enable_multimodal=enable_multimodal,
+        enable_return_routed_experts=enable_return_routed_experts,
         skip_server_warmup=True,
         disable_piecewise_cuda_graph=True,
         api_key=api_key,
@@ -294,6 +296,8 @@ def get_api_server(
         dist_init_addr=(
             get_endpoint(master_addr, master_port) if master_addr and master_port else None
         ),
+        # Aliyun DSW / DLC requires this setting to avoid NCCL error
+        enable_symm_mem=True,
         device="cuda",
     )
 

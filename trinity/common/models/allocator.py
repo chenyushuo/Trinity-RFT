@@ -205,7 +205,9 @@ async def get_model_wrapper(
             await handler.set_master_addr_port.remote(master_addr, master_port)
     await asyncio.gather(*[handler.prepare.remote() for handler in handlers])
     server_address = await handlers[0].get_api_server_url.remote()
-    return ModelWrapper(models=handlers, config=config, api_address=server_address)
+    wrapper = ModelWrapper(models=handlers, config=config, api_address=server_address)
+    await wrapper.prepare()
+    return wrapper
 
 
 async def get_external_model_wrapper(config: InferenceModelConfig) -> ModelWrapper:

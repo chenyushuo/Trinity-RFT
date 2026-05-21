@@ -22,9 +22,43 @@ from trinity.common.experience import (
 )
 
 
-def to_data_proto(
+def _gather_routed_experts(
+    experiences: List[Experience], max_prompt_length: int, max_response_length: int
+) -> torch.Tensor:
+    """Pad routed experts to the full left-padded sequence layout expected by verl."""
+    batch_size = len(experiences)
+    total_length = max_prompt_length + max_response_length
+    routed_experts = experiences[0].routed_experts
+    assert routed_experts is not None, "No routed_experts provided."
+    _, layer_num, topk_num = routed_experts.shape
+    batch_routed_experts = torch.zeros(
+        batch_size,
+        total_length,
+        layer_num,
+        topk_num,
+        dtype=routed_experts.dtype,
+    )
+
+    for idx, exp in enumerate(experiences):
+        exp_routed_experts = exp.routed_experts
+        assert exp_routed_experts is not None, "No routed_experts provided."
+        if exp_routed_experts.ndim != 3:
+            raise ValueError(
+                "Experience.routed_experts must have shape [seq_length - 1, layer_num, topk]."
+            )
+        if exp_routed_experts.shape[1:] != (layer_num, topk_num):
+            raise ValueError("routed_experts shape is inconsistent across experiences.")
+
+        start_pos = max_prompt_length - exp.prompt_length
+        end_pos = min(start_pos + exp_routed_experts.shape[0], total_length)
+        batch_routed_experts[idx, start_pos:end_pos] = exp_routed_experts[: end_pos - start_pos]
+
+    return batch_routed_experts
+
+
+def to_data_proto(  # noqa: C901
     experiences: List[Experience], pad_token_id: int, model: PreTrainedModel, logger: Logger
-) -> DataProto:  # noqa: C901
+) -> DataProto:
     """Convert List[Experience] to verl DataProto."""
     assert len(experiences) > 0, "No experiences provided."
     if experiences[0].experience_type == "dpo":
@@ -83,6 +117,13 @@ def to_data_proto(
     for attr in ["advantages", "returns", "teacher_logprobs"]:
         if all(getattr(exp, attr, None) is not None for exp in experiences):
             batch_dict[attr] = gather_response_attrs(experiences, attr, max_response_length)
+
+    if any(exp.routed_experts is not None for exp in experiences):
+        if not all(exp.routed_experts is not None for exp in experiences):
+            raise ValueError("routed_experts are not consistent across experiences.")
+        batch_dict["routed_experts"] = _gather_routed_experts(
+            experiences, max_prompt_length, max_response_length
+        )
 
     if hasattr(model, "get_rope_index"):
         # used for multi-modal model

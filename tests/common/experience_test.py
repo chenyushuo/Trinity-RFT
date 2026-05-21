@@ -127,6 +127,31 @@ class TestExperience(unittest.TestCase):
         self.assertEqual(exp.reward, exp2.reward)
         self.assertEqual(exp.prompt_length, exp2.prompt_length)
 
+    def test_serialize_deserialize_with_routed_experts(self):
+        tokens = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
+        routed_experts = torch.tensor(
+            [
+                [[1, 2], [3, 4]],
+                [[5, 6], [7, 8]],
+                [[9, 10], [11, 12]],
+            ],
+            dtype=torch.uint8,
+        )
+        exp = Experience(
+            tokens=tokens,
+            reward=1.23,
+            prompt_length=1,
+            routed_experts=routed_experts,
+        )
+
+        data = exp.serialize()
+        restored = Experience.deserialize(data)
+
+        self.assertIsNotNone(restored.routed_experts)
+        self.assertEqual(restored.routed_experts.dtype, torch.uint8)
+        self.assertEqual(restored.routed_experts.shape, routed_experts.shape)
+        self.assertTrue(torch.equal(restored.routed_experts, routed_experts))
+
     def test_serialize_many_deserialize_many(self):
         exp1 = Experience(
             eid=EID(batch=1, task=1, run=1, step=1),
@@ -205,6 +230,40 @@ class TestExperience(unittest.TestCase):
             self.assertTrue(
                 torch.equal(exp.multi_modal_inputs["image_grid_thw"], shared_image_grid_thw)
             )
+
+    def test_serialize_many_deserialize_many_with_routed_experts(self):
+        exp1 = Experience(
+            tokens=torch.tensor([1, 2, 3, 4], dtype=torch.int32),
+            prompt_length=1,
+            routed_experts=torch.tensor(
+                [
+                    [[1, 2], [3, 4]],
+                    [[5, 6], [7, 8]],
+                    [[9, 10], [11, 12]],
+                ],
+                dtype=torch.uint8,
+            ),
+        )
+        exp2 = Experience(
+            tokens=torch.tensor([5, 6, 7], dtype=torch.int32),
+            prompt_length=1,
+            routed_experts=torch.tensor(
+                [
+                    [[13, 14]],
+                    [[15, 16]],
+                ],
+                dtype=torch.uint8,
+            ),
+        )
+
+        payload = Experience.serialize_many([exp1, exp2])
+        restored = Experience.deserialize_many(payload)
+
+        self.assertEqual(len(restored), 2)
+        self.assertTrue(torch.equal(restored[0].routed_experts, exp1.routed_experts))
+        self.assertTrue(torch.equal(restored[1].routed_experts, exp2.routed_experts))
+        self.assertEqual(restored[0].routed_experts.dtype, torch.uint8)
+        self.assertEqual(restored[1].routed_experts.dtype, torch.uint8)
 
     def test_deserialize_legacy_pickle_payload(self):
         exp = Experience(tokens=torch.tensor([1, 2, 3]), reward=1.23, prompt_length=1)

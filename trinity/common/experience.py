@@ -113,6 +113,7 @@ class Experience:
         "chosen",
         "rejected",
         "teacher_logprobs",
+        "routed_experts",
     )
     _META_FIELDS = (
         "eid",
@@ -169,6 +170,9 @@ class Experience:
     # for on-policy distillation
     teacher_logprobs: Optional[Tensor] = None  # [resp_length]
 
+    # for router replay
+    routed_experts: Optional[Tensor] = None  # [seq_length - 1, layer_num, topk_expert_num]
+
     custom_fields: List[CustomField] = field(default_factory=list)
 
     def __init__(  # noqa: C901
@@ -196,6 +200,7 @@ class Experience:
         rejected_messages=None,
         multi_modal_inputs=None,
         teacher_logprobs=None,
+        routed_experts=None,
         custom_fields=None,
     ):
         if action_mask is not None:
@@ -250,6 +255,7 @@ class Experience:
         if isinstance(action_mask, list):
             action_mask = torch.tensor(action_mask, dtype=torch.bool)
         self.action_mask = action_mask
+        self.routed_experts = routed_experts
         self.messages = messages
         self.tools = tools
         if isinstance(chosen, list):
@@ -286,6 +292,8 @@ class Experience:
             self.rejected = torch.tensor(self.rejected)
         if self.teacher_logprobs is not None and not isinstance(self.teacher_logprobs, Tensor):
             self.teacher_logprobs = torch.tensor(self.teacher_logprobs, dtype=torch.float32)
+        if self.routed_experts is not None and not isinstance(self.routed_experts, Tensor):
+            self.routed_experts = torch.tensor(self.routed_experts, dtype=torch.uint8)
         self.custom_fields = custom_fields or []
 
     def serialize(self) -> bytes:

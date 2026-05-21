@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 from trinity.algorithm.advantage_fn.advantage_fn import AdvantageFn, GroupAdvantage
 from trinity.common.experience import Experience, group_by
 from trinity.utils.annotations import Deprecated
-from trinity.utils.monitor import gather_metrics
+from trinity.utils.metrics import aggregate_metrics
 
 
 @Deprecated
@@ -213,7 +213,7 @@ class GRPOGroupedAdvantage(GroupAdvantage):
 
         # Update the filtered_count metric
         filtered_count = sum(metric.pop("skipped_count", 0) for metric in metric_list)
-        metrics = gather_metrics(metric_list, "group_advantages")
+        metrics = aggregate_metrics(metric_list, prefix="group_advantages")
         metrics["filtered_count"] = filtered_count
         if self.duplicate_experiences and self.std_threshold is not None:
             exps = self._duplicate_experiences(exp_groups)

@@ -142,6 +142,7 @@ class vLLMRolloutModel(BaseInferenceModel):
                     "max_new_tokens": self.config.max_response_tokens,
                     "repetition_penalty": self.config.repetition_penalty,
                 },
+                enable_return_routed_experts=self.config.enable_return_routed_experts,
                 reasoning_parser=self.config.reasoning_parser,
                 disable_log_stats=True,
                 enable_log_requests=self.config.enable_log_requests,
@@ -198,6 +199,27 @@ class vLLMRolloutModel(BaseInferenceModel):
             }
         return await self.generate(prompt=prompt, lora_request=lora_request, **kwargs)
 
+    def _extract_routed_experts(self, output: Any, output_index: int) -> Optional[torch.Tensor]:
+        if not self.config.enable_return_routed_experts:
+            return None
+
+        routed_experts_parts = []
+        prompt_routed_experts = getattr(output, "prompt_routed_experts", None)
+        if prompt_routed_experts is not None:
+            routed_experts_parts.append(torch.as_tensor(prompt_routed_experts, dtype=torch.uint8))
+
+        completion_routed_experts = getattr(output.outputs[output_index], "routed_experts", None)
+        if completion_routed_experts is not None:
+            routed_experts_parts.append(
+                torch.as_tensor(completion_routed_experts, dtype=torch.uint8)
+            )
+
+        if not routed_experts_parts:
+            return None
+        if len(routed_experts_parts) == 1:
+            return routed_experts_parts[0]
+        return torch.cat(routed_experts_parts, dim=0)
+
     async def generate(
         self, prompt: Union[str, Dict], lora_request=None, **kwargs
     ) -> Sequence[Experience]:
@@ -252,6 +274,7 @@ class vLLMRolloutModel(BaseInferenceModel):
                 prompt_text=self.tokenizer.decode(output.prompt_token_ids),
                 response_text=output.outputs[i].text,
                 multi_modal_inputs=multi_modal_inputs,
+                routed_experts=self._extract_routed_experts(output, i),
             )
             for i in range(len(output.outputs))
         ]

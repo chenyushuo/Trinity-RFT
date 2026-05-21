@@ -6,7 +6,7 @@ from trinity.buffer import get_buffer_reader
 from trinity.common.config import BufferConfig
 from trinity.common.experience import Experience
 from trinity.utils.annotations import Deprecated
-from trinity.utils.monitor import gather_metrics
+from trinity.utils.metrics import aggregate_metrics
 from trinity.utils.timer import Timer
 
 
@@ -20,7 +20,7 @@ class SampleStrategy(ABC):
             for exp in exp_list
             if "model_version" in exp.info
         ]
-        metrics.update(gather_metrics(metric_list, "sample"))
+        metrics.update(aggregate_metrics(metric_list, prefix="sample"))
 
     @abstractmethod
     async def sample(self, step: int) -> Tuple[List[Experience], Dict, List]:

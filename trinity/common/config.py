@@ -579,6 +579,7 @@ class InferenceModelConfig:
     nnodes: int = 1
     # ! DO NOT SET
     node_rank: int = 0
+    enable_return_routed_experts: bool = False
 
     # ! DO NOT SET
     bundle_indices: str = ""
@@ -635,6 +636,8 @@ class AlgorithmConfig:
     # aggregation mode for losses: 'token-mean' or 'seq-mean-token-sum' or 'seq-mean-token-mean' or 'seq-mean-token-sum-norm'
     # If not set, use 'token-mean'
     loss_agg_mode: Optional[str] = None
+    # rollout router replay, only for MoE models
+    enable_router_replay: bool = False
 
 
 @dataclass

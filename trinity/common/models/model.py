@@ -17,6 +17,11 @@ from torch import Tensor
 from trinity.common.config import InferenceModelConfig
 from trinity.common.constants import RunningStatus, SyncMethod
 from trinity.common.experience import Experience
+from trinity.common.models.experience_extraction import (
+    HistoryRecordingStream,
+    convert_api_output_to_experience,
+    get_routed_experts_layout,
+)
 from trinity.common.models.utils import get_action_mask_method
 from trinity.utils.log import get_logger
 
@@ -358,11 +363,21 @@ class ModelWrapper:
         self.workflow_state: Dict = {}
         self.request_count = 0
         self.state_lock = asyncio.Lock()
+        self._routed_experts_layout: Optional[Tuple[int, int]] = None
 
     async def prepare(self) -> None:
         """Prepare some necessary information for the model before inference."""
         if not self.config.enable_openai_api:
             return
+        if (
+            self.config.enable_return_routed_experts
+            and self.config.engine_type == "sglang"
+            and self._routed_experts_layout is None
+        ):
+            self._routed_experts_layout = get_routed_experts_layout(
+                self.model_path,
+                trust_remote_code=self.config.trust_remote_code,
+            )
         if self.api_address is None:
             if self.model is None:
                 raise ValueError("Cannot get API address from the model.")
@@ -397,6 +412,26 @@ class ModelWrapper:
             self.history.extend(exps)
         else:
             raise TypeError("Expected Experience or List[Experience], got {}".format(type(exps)))
+
+    def _assert_openai_routed_experts_request_supported(
+        self, extra_body: Dict[str, Any], kwargs: Dict[str, Any]
+    ) -> None:
+        """Currently, only SGLang OpenAI API supports returning routed_experts, and it only returns
+        at the response level when n=1. This function asserts that the current request is compatible
+        with these requirements if routed_experts is requested."""
+        requested_routed_experts = self.config.enable_return_routed_experts or bool(
+            extra_body.get("return_routed_experts", False)
+        )
+        if requested_routed_experts:
+            if self.config.engine_type != "sglang":
+                raise ValueError("Routed experts can only be returned from SGLang engine.")
+            if kwargs.get("stream", False):
+                raise ValueError("Routed experts cannot be returned for streaming requests.")
+            if kwargs.get("n", 1) != 1:
+                raise ValueError(
+                    "SGLang OpenAI API returns routed_experts at response level only; "
+                    "set n=1 when requesting routed_experts."
+                )
 
     @_history_recorder
     def generate(self, prompts: List[str], **kwargs) -> List[Experience]:
@@ -574,10 +609,17 @@ class ModelWrapper:
                     chat_template_kwargs["enable_thinking"] = self.config.enable_thinking
                     extra_body["chat_template_kwargs"] = chat_template_kwargs
                 extra_body["return_token_ids"] = True
+                if self.config.enable_return_routed_experts:
+                    extra_body["return_routed_experts"] = True
+                self._assert_openai_routed_experts_request_supported(extra_body, kwargs)
                 response = ori_create(*args, extra_body=extra_body, logprobs=logprobs, **kwargs)
                 if kwargs.get("stream", False):
                     return HistoryRecordingStream(response, self.history, is_async=False)
-                self.history.extend(convert_api_output_to_experience(response))
+                self.history.extend(
+                    convert_api_output_to_experience(
+                        response, routed_experts_layout=self._routed_experts_layout
+                    )
+                )
                 return response
 
             self.openai_client.chat.completions.create = record_chat_completions
@@ -639,12 +681,19 @@ class ModelWrapper:
                     chat_template_kwargs["enable_thinking"] = self.config.enable_thinking
                     extra_body["chat_template_kwargs"] = chat_template_kwargs
                 extra_body["return_token_ids"] = True
+                if self.config.enable_return_routed_experts:
+                    extra_body["return_routed_experts"] = True
+                self._assert_openai_routed_experts_request_supported(extra_body, kwargs)
                 response = await ori_create(
                     *args, extra_body=extra_body, logprobs=logprobs, **kwargs
                 )
                 if kwargs.get("stream", False):
                     return HistoryRecordingStream(response, self.history, is_async=True)
-                self.history.extend(convert_api_output_to_experience(response))
+                self.history.extend(
+                    convert_api_output_to_experience(
+                        response, routed_experts_layout=self._routed_experts_layout
+                    )
+                )
                 return response
 
             self.openai_async_client.chat.completions.create = record_chat_completions
@@ -739,181 +788,3 @@ class ModelWrapper:
         new_wrapper.openai_client = None
         new_wrapper.history = []
         return new_wrapper
-
-
-def convert_api_output_to_experience(
-    output,
-) -> List[Experience]:
-    """Convert non-stream/stream API outputs to a list of experiences."""
-    if hasattr(output, "choices"):
-        return _convert_completion_output_to_experience(output)
-    return _convert_stream_chunks_to_experience(output)
-
-
-class HistoryRecordingStream:
-    def __init__(self, stream, history: List[Experience], is_async: bool = False) -> None:
-        self._stream = stream
-        self._history = history
-        self._chunks = []
-        self._recorded = False
-        self._is_async = is_async
-        if is_async:
-            self._iterator = stream.__aiter__()
-        else:
-            self._iterator = iter(stream)
-
-    # --- Sync methods ---
-    def __iter__(self):
-        if self._is_async:
-            raise TypeError("Use 'async for' for async streams.")
-        return self
-
-    def __next__(self):
-        if self._is_async:
-            raise TypeError("Use 'async for' for async streams.")
-        try:
-            chunk = next(self._iterator)
-        except StopIteration:
-            self._record_history_once()
-            raise
-        self._chunks.append(chunk)
-        return chunk
-
-    def close(self) -> None:
-        if self._is_async:
-            raise TypeError("Use 'aclose' for async streams.")
-        self._record_history_once()
-        close_fn = getattr(self._stream, "close", None)
-        if callable(close_fn):
-            close_fn()
-
-    # --- Async methods ---
-    def __aiter__(self):
-        if not self._is_async:
-            raise TypeError("Use 'for' for sync streams.")
-        return self
-
-    async def __anext__(self):
-        if not self._is_async:
-            raise TypeError("Use 'for' for sync streams.")
-        try:
-            chunk = await self._iterator.__anext__()
-        except StopAsyncIteration:
-            self._record_history_once()
-            raise
-        self._chunks.append(chunk)
-        return chunk
-
-    async def aclose(self) -> None:
-        if not self._is_async:
-            raise TypeError("Use 'close' for sync streams.")
-        self._record_history_once()
-        close_fn = getattr(self._stream, "aclose", None)
-        if callable(close_fn):
-            close_result = close_fn()
-            if hasattr(close_result, "__await__"):
-                await close_result
-            return
-        close_fn = getattr(self._stream, "close", None)
-        if callable(close_fn):
-            close_fn()
-
-    def _record_history_once(self) -> None:
-        if self._recorded:
-            return
-        self._recorded = True
-        if self._chunks:
-            self._history.extend(convert_api_output_to_experience(self._chunks))
-
-    def __getattr__(self, name: str):
-        return getattr(self._stream, name)
-
-
-def _convert_completion_output_to_experience(output) -> List[Experience]:
-    """Convert non-stream chat completion output to experiences."""
-    return [
-        Experience(
-            tokens=torch.cat(
-                (
-                    torch.tensor(output.prompt_token_ids, dtype=torch.int32),
-                    torch.tensor(choice.token_ids, dtype=torch.int32),
-                )
-            ),
-            logprobs=extract_logprobs(choice),
-            prompt_length=len(output.prompt_token_ids),
-            response_text=getattr(choice.message, "content", None),
-        )
-        for choice in output.choices
-    ]
-
-
-def _convert_stream_chunks_to_experience(chunks: Sequence[Any]) -> List[Experience]:
-    """Convert streamed chat completion chunks to experiences."""
-    prompt_token_ids: Optional[List[int]] = None
-    by_choice: Dict[int, Dict[str, Any]] = {}
-
-    for chunk in chunks:
-        if prompt_token_ids is None and hasattr(chunk, "prompt_token_ids"):
-            chunk_prompt_token_ids = getattr(chunk, "prompt_token_ids", None)
-            if chunk_prompt_token_ids is not None:
-                prompt_token_ids = list(chunk_prompt_token_ids)
-
-        for choice in getattr(chunk, "choices", []) or []:
-            idx = getattr(choice, "index", 0)
-            if idx not in by_choice:
-                by_choice[idx] = {
-                    "token_ids": [],
-                    "logprobs": [],
-                    "response_text_parts": [],
-                }
-            data = by_choice[idx]
-
-            token_ids = getattr(choice, "token_ids", None)
-            if token_ids is not None:
-                data["token_ids"].extend(token_ids)
-
-            choice_logprobs = getattr(choice, "logprobs", None)
-            if (
-                choice_logprobs is not None
-                and getattr(choice_logprobs, "content", None) is not None
-            ):
-                for token_logprob in choice_logprobs.content:
-                    data["logprobs"].append(token_logprob.logprob)
-                    if token_ids is None:
-                        token_id = getattr(token_logprob, "token_id", None)
-                        if token_id is not None:
-                            data["token_ids"].append(token_id)
-
-            delta = getattr(choice, "delta", None)
-            if delta is not None:
-                delta_content = getattr(delta, "content", None)
-                if isinstance(delta_content, str) and len(delta_content) > 0:
-                    data["response_text_parts"].append(delta_content)
-
-    prompt_token_ids = prompt_token_ids or []
-    exps: List[Experience] = []
-    for idx in sorted(by_choice.keys()):
-        data = by_choice[idx]
-        response_token_ids = data["token_ids"]
-        if len(response_token_ids) == 0:
-            continue
-        response_text = "".join(data["response_text_parts"])
-        exps.append(
-            Experience(
-                tokens=torch.tensor(prompt_token_ids + response_token_ids, dtype=torch.int32),
-                logprobs=torch.tensor(data["logprobs"], dtype=torch.float32),
-                prompt_length=len(prompt_token_ids),
-                response_text=response_text,
-            )
-        )
-    return exps
-
-
-def extract_logprobs(choice) -> Tensor:
-    """Extract logprobs from a list of logprob dictionaries."""
-    if not hasattr(choice, "logprobs") or choice.logprobs is None:
-        return torch.tensor([], dtype=torch.float32)
-    return torch.tensor(
-        [logprob.logprob for logprob in choice.logprobs.content],
-        dtype=torch.float32,
-    )

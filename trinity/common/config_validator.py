@@ -676,6 +676,9 @@ class ExplorerConfigValidator(ConfigValidator):
         set_if_none(
             config.explorer.rollout_model, "chat_template", config.model.custom_chat_template
         )
+        config.explorer.rollout_model.enable_return_routed_experts = (
+            config.algorithm.enable_router_replay
+        )
         config.explorer.rollout_model.ray_namespace = config.ray_namespace
         if (
             config.mode == "colocate"

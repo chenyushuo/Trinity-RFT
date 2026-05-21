@@ -13,7 +13,7 @@ from trinity.common.config import Config
 from trinity.common.workflows import Task
 from trinity.explorer.scheduler import Scheduler
 from trinity.utils.log import get_logger
-from trinity.utils.monitor import gather_eval_metrics, gather_metrics
+from trinity.utils.metrics import aggregate_eval_metrics, aggregate_metrics
 
 BatchId = Union[int, str]
 BatchType = Literal["train", "eval"]
@@ -324,15 +324,15 @@ class RolloutCoordinator:
         ]
         if batch_state.batch_type == "train":
             if status_metrics:
-                metrics.update(gather_metrics(status_metrics, "rollout"))
+                metrics.update(aggregate_metrics(status_metrics, prefix="rollout"))
             metrics["rollout/finished_task_count"] = float(batch_state.completed_task_count)
         else:
             prefix = self._eval_metric_prefix(batch_state.batch_id)
             if status_metrics:
                 metrics.update(
-                    gather_eval_metrics(
+                    aggregate_eval_metrics(
                         status_metrics,
-                        prefix,
+                        prefix=prefix,
                         detailed_stats=self.detailed_stats,
                     )
                 )

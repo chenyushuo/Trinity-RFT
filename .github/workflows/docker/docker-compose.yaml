@@ -15,6 +15,7 @@ services:
       - TRINITY_SFT_DATASET_PATH=/mnt/data
       - TRINITY_MODEL_PATH=/mnt/models/Qwen3-0.6B
       - TRINITY_API_MODEL_PATH=/mnt/models/Qwen3.5-0.8B
+      - TRINITY_MOE_MODEL_PATH=/mnt/models/Qwen3.5-35B-A3B
       - TRINITY_VLM_MODEL_PATH=/mnt/models/Qwen3.5-0.8B
       - TRINITY_ALTERNATIVE_VLM_MODEL_PATH=/mnt/models/Qwen3.5-0.8B
       - VIRTUAL_ENV=/opt/venv
@@ -45,6 +46,7 @@ services:
       - TRINITY_CHECKPOINT_ROOT_DIR=/mnt/checkpoints
       - TRINITY_TASKSET_PATH=/mnt/data
       - TRINITY_MODEL_PATH=/mnt/models/Qwen3-0.6B
+      - TRINITY_MOE_MODEL_PATH=/mnt/models/Qwen3.5-35B-A3B
       - VIRTUAL_ENV=/opt/venv
     working_dir: /workspace
     volumes:

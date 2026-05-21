@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Tuple
 
 from trinity.buffer.operators import ExperienceOperator
 from trinity.common.experience import Experience
-from trinity.utils.monitor import gather_metrics
+from trinity.utils.metrics import aggregate_metrics
 
 
 class AdvantageFn(ABC):
@@ -73,7 +73,7 @@ class GroupAdvantage(AdvantageFn, ExperienceOperator):
         for group_id, group_exps in exp_groups.items():
             group_exps, group_metrics = self.calculate_group_advantage(group_id, group_exps)
             metric_list.append(group_metrics)
-        metrics = gather_metrics(metric_list, "group_advantages")
+        metrics = aggregate_metrics(metric_list, prefix="group_advantages")
         exps = [exp for group in exp_groups.values() for exp in group]  # Flatten the list
         return exps, metrics
 
