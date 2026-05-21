@@ -235,13 +235,7 @@ class Scheduler:
         self.default_timeout = config.explorer.max_timeout * (config.explorer.max_retry_times + 1)
         self.max_retry_times = config.explorer.max_retry_times
         self.max_repeat_times = config.explorer.max_repeat_times_per_runner
-        self.default_batch_size = (
-            config.buffer.batch_size * config.synchronizer.explorer_sync_interval  # type: ignore
-        )
-        if self.max_repeat_times is not None:
-            self.default_batch_size *= int(
-                np.ceil(config.algorithm.repeat_times / self.max_repeat_times)
-            )
+        self.default_batch_size = config.buffer.batch_size
         self.running = False
 
         self.runner_num = (

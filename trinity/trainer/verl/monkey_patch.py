@@ -351,24 +351,6 @@ def apply_monkey_patch(  # noqa: C901
         Qwen3_5Model.forward = qwen35_model_forward
         Qwen3_5MoeModel.forward = qwen35_model_forward
 
-        from trinity.common.patch.qwen3_5 import (
-            decoder_layer_forward,
-            gate_delta_net_forward,
-            qwen35_model_forward,
-            qwen35_vision_fast_pos_embed_interpolate,
-        )
-
-        Qwen3_5DecoderLayer.forward = decoder_layer_forward
-        Qwen3_5MoeDecoderLayer.forward = decoder_layer_forward
-        Qwen3_5GatedDeltaNet.forward = gate_delta_net_forward
-        Qwen3_5MoeGatedDeltaNet.forward = gate_delta_net_forward
-
-        Qwen3_5VisionModel.fast_pos_embed_interpolate = qwen35_vision_fast_pos_embed_interpolate
-        Qwen3_5MoeVisionModel.fast_pos_embed_interpolate = qwen35_vision_fast_pos_embed_interpolate
-
-        Qwen3_5Model.forward = qwen35_model_forward
-        Qwen3_5MoeModel.forward = qwen35_model_forward
-
         # Step 2: patch input for multimodal sequence parallelism
         if ulysses_sp_size > 1:
             patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
