@@ -769,6 +769,7 @@ class TrainerConfig:
     trainer_strategy: str = "fsdp2"  # "fsdp", "fsdp2" or "megatron"
     save_interval: int = 0
     enable_preview: bool = True  # enable rollout preview in wandb
+    enable_prefetch: bool = False  # whether to prefetch data for the next step during training
     total_steps: Optional[
         int
     ] = None  # total training steps, training stops when reaching this step, None means no limit

@@ -59,6 +59,7 @@ class Trainer:
             sample_strategy_state = trainer_state.get("sample_strategy_state", {})
         self.sample_strategy.load_state_dict(sample_strategy_state)
         self.save_interval = config.trainer.save_interval
+        self.enable_prefetch = config.trainer.enable_prefetch
         self.last_sync_step = 0
         self.last_sync_time = None
         self.sync_interval: int = config.synchronizer.trainer_sync_interval
@@ -106,7 +107,7 @@ class Trainer:
 
                 # 2. 当前 step 开始训练的同时，预取下一步数据
                 #    注意：只有在理论上还可能存在下一步时才预取
-                if self.train_step_num + 1 < self.total_steps:
+                if self.enable_prefetch and self.train_step_num + 1 < self.total_steps:
                     self.logger.info(f"Sample data for step {self.train_step_num + 2} started.")
 
                     # prefetched_sample_task = asyncio.create_task(self._sample_data())

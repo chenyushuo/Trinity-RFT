@@ -40,6 +40,7 @@ trainer:
   trainer_strategy: fsdp2
   total_steps: ${oc.env:TOTAL_STEPS,1000}
   save_interval: 100
+  enable_prefetch: true
   grad_clip: 1.0
   use_dynamic_bsz: ${oc.env:USE_DYNAMIC_BSZ,true}
   ulysses_sequence_parallel_size: ${oc.env:SP_SIZE,1}

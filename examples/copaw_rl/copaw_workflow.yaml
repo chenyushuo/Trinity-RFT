@@ -18,13 +18,15 @@ model:
   model_path: ${oc.env:MODEL_DIR,/mnt/data/chenyushuo.cys/rlhf_space/models}/${oc.env:EXP_MODEL_NAME}
   max_model_len: 262144
   enable_thinking: true
+  top_p: 0.95
+  top_k: 20
 cluster:
   node_num: ${oc.env:WORLD_SIZE,1}
   gpu_per_node: ${oc.env:NPROC_PER_NODE,8}
 data_processor:
   experience_pipeline:
     operators:
-    - name: 'reward_std_filter_v2'
+    - name: 'reward_std_filter'
       args:
         threshold: 0.00
 buffer:
