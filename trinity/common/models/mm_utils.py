@@ -14,6 +14,11 @@ Provides functions to:
 Note:
     Only processors with class names containing both ("Qwen", "Kimi" OR "Glm") AND "Processor" are supported.
     Relies on `qwen_vl_utils.process_vision_info` for media extraction.
+
+Compatibility:
+    `ClientMultiModalProcessor` normalizes legacy transformers-style message parts
+    (e.g., type=image with url/path/base64) into vLLM/OpenAI-style part schema
+    before calling vLLM `parse_chat_messages`.
 """
 import asyncio
 import re
@@ -30,6 +35,21 @@ from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from trinity.utils.log import get_logger
+
+
+_MM_TYPE_TO_URL_FIELD = {
+    "image": "image_url",
+    "video": "video_url",
+    "audio": "audio_url",
+}
+
+# Field order follows legacy transformers multimodal conventions in
+# processing_utils.apply_chat_template.
+_LEGACY_MM_VALUE_KEYS = {
+    "image": ("image", "url", "path", "base64", "image_url"),
+    "video": ("video", "url", "path", "video_url"),
+    "audio": ("audio", "url", "path", "audio_url"),
+}
 
 
 def is_qwen_like_processor(processor: Any) -> bool:
@@ -92,8 +112,7 @@ def build_mm_input_for_training(
     Handles padding and tensor conversion for training workflows.
 
     Args:
-        processor: Vision-language processor instance (must have class name containing
-                   ("Qwen", "Kimi" OR "Glm") AND "Processor").
+        processor: Vision-language processor instance.
         prompt: Plain text prompt WITHOUT media tags (e.g., "Describe this image").
                 Media placement is handled via `multi_modal_data`, not prompt tags.
         multi_modal_data: Dictionary from `build_multi_modal_data()` containing:
@@ -108,26 +127,20 @@ def build_mm_input_for_training(
         All tensors converted to PyTorch format (`return_tensors="pt"`).
 
     Raises:
-        NotImplementedError: If processor class name doesn't match supported patterns.
         ValueError: If media counts mismatch prompt expectations (handled internally by processor).
 
     Note:
         Prompt should NOT contain <image>/<video> tags here. Media association is managed
         through the structured `multi_modal_data` dictionary.
     """
-    processor_class_name = processor.__class__.__name__
-    if is_qwen_like_processor(processor):
-        inputs = processor(
-            text=[prompt],
-            images=multi_modal_data.get("image", None),
-            videos=multi_modal_data.get("video", None),
-            padding=True,
-            return_tensors="pt",
-        )
-        return dict(inputs)
-    raise NotImplementedError(
-        f"Processor '{processor_class_name}' not supported. Only Qwen/Kimi/Glm VL processors are supported."
+    inputs = processor(
+        text=[prompt],
+        images=multi_modal_data.get("image", None),
+        videos=multi_modal_data.get("video", None),
+        padding=True,
+        return_tensors="pt",
     )
+    return dict(inputs)
 
 
 def build_mm_message(
@@ -238,12 +251,13 @@ class ClientMultiModalProcessor:
 
     This class enables RL training endpoints to extract multimodal data
     with identical processing to the inference server, ensuring consistency.
+    Legacy transformers-style content parts are normalized to vLLM-compatible
+    OpenAI part schema before parsing.
     """
 
     def __init__(
         self,
-        model_name: str,
-        model_path: Optional[str] = None,
+        model_path: str,
         *,
         media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
         allowed_local_media_path: str = "",
@@ -255,8 +269,7 @@ class ClientMultiModalProcessor:
         Initialize the client-side multimodal processor.
 
         Args:
-            model_name: Model identifier (e.g., 'llava-1.5-7b')
-            model_path: Path to the model (optional, will use default if not provided)
+            model_path: Path to the model
             media_io_kwargs: Media I/O configuration (mirrors --media-io-kwargs)
             allowed_local_media_path: Path to allowed local media directory
             allowed_media_domains: List of allowed media domains
@@ -265,16 +278,16 @@ class ClientMultiModalProcessor:
         """
         self.logger = get_logger(__name__)
 
-        self.model_name = model_name
         self.model_path = model_path
         self.media_io_kwargs = media_io_kwargs or {}
         self.mm_processor_kwargs = mm_processor_kwargs or {}
 
         # Initialize ModelConfig
-        self.model_config = self._create_model_config(
-            model_name,
-            model_path,
-            media_io_kwargs=self.media_io_kwargs,
+        self.model_config = ModelConfig(
+            model=model_path,
+            tokenizer=model_path,
+            tokenizer_mode="auto",
+            trust_remote_code=True,
         )
 
         # Initialize multimodal processor if the model supports it
@@ -282,7 +295,7 @@ class ClientMultiModalProcessor:
         if self.model_config.is_multimodal_model:
             try:
                 self.mm_processor = MULTIMODAL_REGISTRY.create_processor(self.model_config)
-                self.logger.info("Initialized multimodal processor for model: %s", model_name)
+                self.logger.info("Initialized multimodal processor for model: %s", model_path)
             except Exception as e:
                 self.logger.warning(
                     "Failed to initialize multimodal processor: %s. "
@@ -298,27 +311,6 @@ class ClientMultiModalProcessor:
         }
 
         self.trust_request_chat_template = trust_request_chat_template
-
-    def _create_model_config(
-        self,
-        model_name: str,
-        model_path: Optional[str] = None,
-        media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
-    ) -> ModelConfig:
-        """
-        Create a ModelConfig instance matching the server configuration.
-
-        This requires the model to be loadable from HuggingFace or local path.
-        """
-        # Create ModelConfig with multimodal support
-        model_config = ModelConfig(
-            model=model_name,
-            tokenizer=model_name,
-            tokenizer_mode="auto",
-            trust_remote_code=True,
-        )
-
-        return model_config
 
     def process_messages(
         self,
@@ -346,8 +338,10 @@ class ClientMultiModalProcessor:
         if use_async:
             return asyncio.run(self.process_messages_async(messages, content_format))
 
+        normalized_messages = self._normalize_messages_for_vllm(messages)
+
         conversation, mm_data, mm_uuids = parse_chat_messages(
-            messages=messages,
+            messages=normalized_messages,
             model_config=self.model_config,
             content_format=content_format,
             media_io_kwargs=self._media_connector_config["media_io_kwargs"],
@@ -368,8 +362,10 @@ class ClientMultiModalProcessor:
         """
         Async version of process_messages for concurrent media fetching.
         """
+        normalized_messages = self._normalize_messages_for_vllm(messages)
+
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
-            messages=messages,
+            messages=normalized_messages,
             model_config=self.model_config,
             content_format=content_format,
             media_io_kwargs=self._media_connector_config["media_io_kwargs"],
@@ -378,83 +374,76 @@ class ClientMultiModalProcessor:
 
         return conversation, mm_data, mm_uuids
 
-    def apply_mm_processor(
-        self,
-        mm_data: Optional[MultiModalDataDict],
-        mm_uuids: Optional[MultiModalUUIDDict],
-    ) -> dict[str, Any]:
+    def _normalize_messages_for_vllm(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Normalize legacy multimodal content parts for vLLM parser.
+
+        vLLM `parse_chat_messages` accepts OpenAI-style parts (image_url,
+        video_url, audio_url, image_pil, etc.). This function rewrites common
+        legacy transformers-style variants into that schema.
         """
-        Apply the multimodal processor to convert raw media to embeddings.
 
-        This step mirrors the server's mm_processor.apply() call.
+        def _infer_modality(part: dict[str, Any]) -> Optional[str]:
+            part_type = part.get("type")
+            if part_type in _LEGACY_MM_VALUE_KEYS:
+                return part_type
+            for modality, keys in _LEGACY_MM_VALUE_KEYS.items():
+                if any(key in part for key in keys):
+                    return modality
+            return None
 
-        Args:
-            mm_data: Raw multimodal data dict
-            mm_uuids: Multimodal UUIDs for tracking
+        def _extract_media_value(part: dict[str, Any], modality: str) -> tuple[Any, Optional[str]]:
+            for key in _LEGACY_MM_VALUE_KEYS[modality]:
+                if key not in part or part.get(key) is None:
+                    continue
+                value = part.get(key)
+                if key == _MM_TYPE_TO_URL_FIELD[modality] and isinstance(value, dict):
+                    return value.get("url"), key
+                return value, key
+            return None, None
 
-        Returns:
-            Processed multimodal inputs (embeddings, etc.)
-        """
-        if not self.mm_processor or not mm_data:
-            return {}
+        def _to_vllm_part(part: dict[str, Any], modality: str) -> dict[str, Any]:
+            media_value, source_key = _extract_media_value(part, modality)
+            if isinstance(media_value, str):
+                # Preserve existing data URLs; upgrade raw image base64 payload.
+                if (
+                    modality == "image"
+                    and source_key == "base64"
+                    and not media_value.startswith("data:")
+                ):
+                    media_value = f"data:image/png;base64,{media_value}"
+                url_field = _MM_TYPE_TO_URL_FIELD[modality]
+                return {"type": url_field, url_field: {"url": media_value}}
 
-        try:
-            from vllm.multimodal.processing import MMProcessorInputs
-            from vllm.renderers.inputs.preprocess import set_default_torch_num_threads
+            if modality == "image" and media_value is not None:
+                # vLLM can parse PIL-like object through image_pil content part.
+                return {"type": "image_pil", "image_pil": media_value}
 
-            mm_processor_inputs = MMProcessorInputs(
-                prompt="",  # Prompt already tokenized
-                mm_data_items=self.mm_processor.info.parse_mm_data(mm_data),
-                mm_uuid_items={} if not mm_uuids else mm_uuids,
-                hf_processor_mm_kwargs=self.mm_processor_kwargs.copy(),
-                tokenization_kwargs={},
-            )
+            return dict(part)
 
-            with set_default_torch_num_threads():
-                mm_inputs = self.mm_processor.apply(
-                    mm_processor_inputs,
-                    timing_ctx=None,
-                )
+        normalized_messages: list[dict[str, Any]] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                normalized_messages.append(dict(message))
+                continue
 
-            return mm_inputs
-        except Exception as e:
-            self.logger.error(
-                "Failed to apply multimodal processor: %s. " "Returning raw mm_data instead.", e
-            )
-            return {"mm_data": mm_data, "mm_uuids": mm_uuids}
+            normalized_content = []
+            for part in content:
+                if not isinstance(part, dict):
+                    normalized_content.append(part)
+                    continue
 
-    def get_mm_data_for_training(
-        self,
-        messages: list[dict[str, Any]],
-        include_processed: bool = True,
-    ) -> dict[str, Any]:
-        """
-        Extract multimodal data in a training-friendly format.
+                modality = _infer_modality(part)
+                if modality is not None:
+                    normalized_content.append(_to_vllm_part(part, modality))
+                    continue
 
-        This is a convenience method that combines all processing steps
-        and returns a dict suitable for RL training.
+                normalized_content.append(dict(part))
 
-        Args:
-            messages: Chat messages with multimodal content
-            include_processed: Whether to include processed embeddings
+            normalized_message = dict(message)
+            normalized_message["content"] = normalized_content
+            normalized_messages.append(normalized_message)
 
-        Returns:
-            Dict containing:
-                - "conversation": processed conversation messages
-                - "mm_data": raw multimodal data
-                - "mm_uuids": multimodal identifiers
-                - "mm_inputs" (optional): processed multimodal inputs
-        """
-        conversation, mm_data, mm_uuids = self.process_messages(messages)
-
-        result = {
-            "conversation": conversation,
-            "mm_data": mm_data,
-            "mm_uuids": mm_uuids,
-        }
-
-        if include_processed and mm_data:
-            mm_inputs = self.apply_mm_processor(mm_data, mm_uuids)
-            result["mm_inputs"] = mm_inputs
-
-        return result
+        return normalized_messages

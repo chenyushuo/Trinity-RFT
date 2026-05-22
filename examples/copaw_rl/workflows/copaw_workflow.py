@@ -66,7 +66,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
 
         exps = []
         processor = None
-        vllm_processor = ClientMultiModalProcessor(model_name=model_path)
+        vllm_processor = ClientMultiModalProcessor(model_path=model_path)
         for data in dataset:
             prompt_token_ids = torch.tensor(data["prompt_token_ids"])
             response_token_ids = torch.tensor(data["token_ids"])
