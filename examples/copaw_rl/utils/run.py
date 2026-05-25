@@ -78,12 +78,33 @@ def parse_args():
         default=False,
         help="Enable OpenTelemetry tracing.",
     )
+    parser.add_argument(
+        "--agent-timeout-seconds",
+        type=float,
+        default=None,
+        help="Max seconds to wait for the agent before sending a stop signal.",
+    )
     return parser.parse_args()
 
 
 def read_file(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read().strip()
+
+
+def _wait_for_session_file(
+    session_file_candidates: list[str],
+    *,
+    timeout_seconds: float,
+    poll_interval: float = 1.0,
+) -> str | None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        for session_file in session_file_candidates:
+            if os.path.exists(session_file):
+                return session_file
+        time.sleep(poll_interval)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1094,7 +1115,7 @@ def main(args=None):  # noqa: C901
         with trace_span(
             "call_agent", {"session_id": args.session_id, "model_id": args.provider_model_id}
         ):
-            call_agent(
+            agent_run = call_agent(
                 url=args.url.strip("/"),
                 user_input=agent_input,
                 session_id=args.session_id,
@@ -1103,9 +1124,12 @@ def main(args=None):  # noqa: C901
                 provider_base_url=args.provider_base_url,
                 provider_api_key=args.provider_api_key,
                 provider_model_id=args.provider_model_id,
+                timeout_seconds=args.agent_timeout_seconds,
             )
         duration_seconds = round(time.time() - t_start, 2)
         log.info("完成调用 agent API，耗时: %.2f 秒", duration_seconds)
+        if agent_run.timed_out:
+            log.warning("Agent 调用因超时结束，后续继续导出 session/trajectory")
 
         # Step 5: 读取 session JSON 并提取 trajectories
         test_dir = os.path.join(_SCRIPT_DIR, "tests")
@@ -1115,6 +1139,13 @@ def main(args=None):  # noqa: C901
             f"{args.sessions_dir}/{args.user_id}_{args.session_id}.json",
             f"{args.sessions_dir}/console/{args.user_id}_{args.session_id}.json",  # for qwenpaw>=1.1.6
         ]
+        if agent_run.timed_out:
+            waited_session_file = _wait_for_session_file(
+                session_file_candidates,
+                timeout_seconds=20.0,
+            )
+            if waited_session_file:
+                log.info("超时后等待到 session 文件落盘: %s", waited_session_file)
         for session_file in session_file_candidates:
             if os.path.exists(session_file):
                 break
@@ -1140,7 +1171,11 @@ def main(args=None):  # noqa: C901
                 from export_training_data import export_training_data
 
                 export_training_data(
-                    args.task_id, trajectories, session_data=session_data, input_answer=input_answer
+                    args.task_id,
+                    trajectories,
+                    session_data=session_data,
+                    input_answer=input_answer,
+                    timed_out=agent_run.timed_out,
                 )
             return
 
@@ -1242,6 +1277,7 @@ def main(args=None):  # noqa: C901
         eval_result = {
             "status": "passed" if result.returncode == 0 else "failed",
             "score": test_result["score"],
+            "agent_timed_out": agent_run.timed_out,
             "tests": {
                 "total": test_result["total"],
                 "passed": test_result["passed"],
@@ -1286,6 +1322,7 @@ def main(args=None):  # noqa: C901
                 "tasks": [
                     {
                         "session_id": args.session_id,
+                        "agent_timed_out": agent_run.timed_out,
                         "final_text": final_text,
                         "status": "completed",
                         "duration_seconds": duration_seconds,

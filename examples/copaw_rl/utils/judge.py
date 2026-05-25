@@ -81,6 +81,11 @@ PREFIX_ALIASES: Dict[str, str] = {
     "nl2bash": "nl2bash",
     "skill": "skill",
     "sp": "sp",
+    "gui": "gui",
+    "merged": "merged",
+    "oss": "oss",
+    "seed": "seed",
+    "task": "task",
 }
 
 PREFIX_DOMAIN: Dict[str, str] = {
@@ -103,6 +108,11 @@ PREFIX_DOMAIN: Dict[str, str] = {
     "nl2bash": "nl2bash",
     "skill": "skill",
     "sp": "systemprompt",
+    "gui": "gui",
+    "merged": "merged",
+    "oss": "oss",
+    "seed": "seed",
+    "task": "task",
 }
 
 GRADER_PLAN_BY_DOMAIN: Dict[str, list[GraderSpec]] = {
@@ -160,6 +170,26 @@ GRADER_PLAN_BY_DOMAIN: Dict[str, list[GraderSpec]] = {
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
     "systemprompt": [
+        GraderSpec("TrajectoryGrader", "trajectory"),
+    ],
+    "gui": [
+        GraderSpec("CorrectnessGrader", "correctness"),
+        GraderSpec("TrajectoryGrader", "trajectory"),
+    ],
+    "merged": [
+        GraderSpec("CorrectnessGrader", "correctness"),
+        GraderSpec("TrajectoryGrader", "trajectory"),
+    ],
+    "oss": [
+        GraderSpec("CorrectnessGrader", "correctness"),
+        GraderSpec("TrajectoryGrader", "trajectory"),
+    ],
+    "seed": [
+        GraderSpec("CorrectnessGrader", "correctness"),
+        GraderSpec("TrajectoryGrader", "trajectory"),
+    ],
+    "task": [
+        GraderSpec("CorrectnessGrader", "correctness"),
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
 }

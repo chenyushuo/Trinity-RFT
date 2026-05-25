@@ -156,27 +156,36 @@ def _extract_final_response(trajectories: list):
     return _extract_text(response)
 
 
-def export_training_data(task_id, trajectories, session_data=None, input_answer=None) -> None:
-    try:
-        query = _extract_first_user_query(trajectories)
-        final_response = _extract_final_response(trajectories)
-        judge_session = (
-            session_data
-            if isinstance(session_data, dict)
-            else {"agent": {"_model_trajectory": trajectories}}
-        )
-
-        with trace_span("llm_judge"):
-            reward, judge_reason = _llm_judge(
-                query=query,
-                session_data=judge_session,
-                final_response=final_response,
-                task_id=task_id,
-                input_answer=input_answer,
+def export_training_data(
+    task_id,
+    trajectories,
+    session_data=None,
+    input_answer=None,
+    timed_out: bool = False,
+) -> None:
+    if timed_out:
+        reward, judge_reason = 0.0, "call_agent 超时结束，跳过 LLM judge"
+    else:
+        try:
+            query = _extract_first_user_query(trajectories)
+            final_response = _extract_final_response(trajectories)
+            judge_session = (
+                session_data
+                if isinstance(session_data, dict)
+                else {"agent": {"_model_trajectory": trajectories}}
             )
-    except Exception as judge_exc:
-        # 判断出错时保守处理：视为失败
-        reward, judge_reason = 0.0, f"LLM判断异常(失败): {judge_exc}"
+
+            with trace_span("llm_judge"):
+                reward, judge_reason = _llm_judge(
+                    query=query,
+                    session_data=judge_session,
+                    final_response=final_response,
+                    task_id=task_id,
+                    input_answer=input_answer,
+                )
+        except Exception as judge_exc:
+            # 判断出错时保守处理：视为失败
+            reward, judge_reason = 0.0, f"LLM判断异常(失败): {judge_exc}"
     log.info("LLM judge result: %s, reason: %s", reward, judge_reason)
 
     dataset = []

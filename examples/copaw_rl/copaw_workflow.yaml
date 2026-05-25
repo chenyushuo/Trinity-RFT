@@ -13,7 +13,7 @@ algorithm:
     min_lr_ratio: 0.1
   sample_strategy: staleness_control
   sample_strategy_args:
-    max_staleness: 5
+    max_staleness: ${oc.env:MAX_STALENESS,5}
 model:
   model_path: ${oc.env:MODEL_DIR,/mnt/data/chenyushuo.cys/rlhf_space/models}/${oc.env:EXP_MODEL_NAME}
   max_model_len: 262144
@@ -69,10 +69,10 @@ buffer:
     experience_buffer:
       name: experience_buffer
       storage_type: queue
-      max_read_timeout: 4200
+      max_read_timeout: 6000
       replay_buffer:
         enable: true
-        reuse_cooldown_time: 30
+        reuse_cooldown_time: ${oc.env:REUSE_COOLDOWN_TIME,30}
         priority_fn: 'decay_limit_randomization'
         priority_fn_args:
           decay: 1.0

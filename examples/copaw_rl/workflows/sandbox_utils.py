@@ -208,7 +208,7 @@ def run_with_reconnect(sandbox: Sandbox, cmd, envs, logger, max_retries=5):
         cmd,
         background=True,
         envs=envs,
-        timeout=1000,  # about 16 min; was 3600
+        timeout=1180,  # about 20 min; was 3600
         request_timeout=1800,
     )
     pid = handle.pid
@@ -313,7 +313,8 @@ def run_workflow(
 ):
     cmd = (
         f"python run.py --task-id {task_id} --oss-prefix {oss_config['prefix']} "
-        f"--provider-base-url {api_server_url} --provider-model-id {model_path}"
+        f"--provider-base-url {api_server_url} --provider-model-id {model_path} "
+        f"--agent-timeout-seconds 1100"
     )
     envs = {}
     enable_otel = otel_config.pop("enable", False)
