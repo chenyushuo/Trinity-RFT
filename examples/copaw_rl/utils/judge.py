@@ -13,6 +13,25 @@ from typing import Any, Dict, Mapping, Optional, Union
 import yaml
 from otel_init import trace_span
 
+try:
+    from judge_reward import (
+        DEFAULT_REWARD_POLICY,
+        GraderScoreEntry,
+        PROCESS_EVALUATORS,
+        RewardPolicy,
+        aggregate_grader_scores,
+        finalize_reward,
+    )
+except ImportError:
+    from .judge_reward import (  # type: ignore[no-redef]
+        DEFAULT_REWARD_POLICY,
+        GraderScoreEntry,
+        PROCESS_EVALUATORS,
+        RewardPolicy,
+        aggregate_grader_scores,
+        finalize_reward,
+    )
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -54,6 +73,7 @@ class GraderSpec:
     evaluator: str
     include_in_score: bool = True
     force_hallucination_mode: bool = False
+    weight: float = 1.0
 
 
 PREFIX_ALIASES: Dict[str, str] = {
@@ -387,8 +407,11 @@ async def _run_grader_plan(
     query: str,
     session: Mapping[str, Any],
     input_answer: Any,
+    domain: str,
+    has_answer: bool,
+    policy: RewardPolicy = DEFAULT_REWARD_POLICY,
 ) -> tuple[float, str]:
-    scored: list[float] = []
+    entries: list[GraderScoreEntry] = []
     info_lines: list[str] = []
 
     for spec in plan:
@@ -401,18 +424,56 @@ async def _run_grader_plan(
             )
         log_grader_score_line(result, label=spec.name)
         normalized, reason = _score_from_result(result)
+        high_variance = False
+        metadata = getattr(result, "metadata", None)
+        if isinstance(metadata, dict):
+            high_variance = bool(metadata.get("_high_variance", False))
+
         tag = "score" if spec.include_in_score else "log_only"
         info_lines.append(
             f"{spec.name}[{tag}]={normalized:.4f}" + (f" | {reason}" if reason else "")
         )
         if spec.include_in_score:
-            scored.append(normalized)
+            entries.append(
+                GraderScoreEntry(
+                    evaluator=spec.evaluator,
+                    normalized=normalized,
+                    include_in_score=True,
+                    high_variance=high_variance,
+                    weight=spec.weight,
+                )
+            )
 
-    if not scored:
+    if not entries:
         return 0.0, "无可计分 grader"
 
-    final_score = sum(scored) / len(scored)
-    return final_score, " || ".join(info_lines)
+    raw_score, aggregate_detail = aggregate_grader_scores(
+        entries,
+        domain=domain,
+        policy=policy,
+    )
+    outcome_scores = [
+        entry.normalized
+        for entry in entries
+        if entry.evaluator not in PROCESS_EVALUATORS
+    ]
+    any_high_variance = any(entry.high_variance for entry in entries)
+    final_score, penalty_detail = finalize_reward(
+        raw_score,
+        session,
+        has_answer=has_answer,
+        outcome_scores=outcome_scores,
+        any_high_variance=any_high_variance,
+        policy=policy,
+    )
+    details = " || ".join(
+        [
+            " || ".join(info_lines),
+            f"aggregate: {aggregate_detail}",
+            f"penalties: {penalty_detail}",
+        ]
+    )
+    return final_score, details
 
 
 def run_judge(task_yaml_path: Union[str, Path]) -> Any:
@@ -464,6 +525,9 @@ def llm_judge(
                         query=str(query),
                         session=session,
                         input_answer=input_answer if _answer_is_non_empty(input_answer) else "",
+                        domain=task_info.domain,
+                        has_answer=has_answer,
+                        policy=DEFAULT_REWARD_POLICY,
                     )
                 )
             break
