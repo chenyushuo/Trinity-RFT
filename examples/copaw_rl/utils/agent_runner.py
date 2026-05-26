@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import threading
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -164,7 +163,9 @@ def _collect_type_specific_events(
         return
 
     if node_type == "tool_use":
-        _append_event(events, seen, "tool_use", name=node.get("name"), event_input=node.get("input"))
+        _append_event(
+            events, seen, "tool_use", name=node.get("name"), event_input=node.get("input")
+        )
         return
 
     if node_type == "tool_result":
@@ -347,7 +348,7 @@ def _configure_provider(
     )
 
 
-def _parse_sse_line(raw_line: str | bytes, log: logging.Logger) -> dict[str, Any] | None:
+def _parse_sse_line(raw_line: str, log: logging.Logger) -> dict[str, Any] | None:
     if not raw_line:
         return None
 
@@ -587,6 +588,11 @@ def call_agent(
             "stream did not include tool events; tool calls will be visible from session trajectory"
         )
     if timed_out and not stop_succeeded:
-        log.warning("call_agent timed out but no stop endpoint confirmed interruption for session=%s", session_id)
-    log.info("stream completed, total_steps=%d, tool_events=%d", state.step_idx, state.tool_event_count)
+        log.warning(
+            "call_agent timed out but no stop endpoint confirmed interruption for session=%s",
+            session_id,
+        )
+    log.info(
+        "stream completed, total_steps=%d, tool_events=%d", state.step_idx, state.tool_event_count
+    )
     return CallAgentResult(timed_out=timed_out, stop_succeeded=stop_succeeded)

@@ -208,7 +208,7 @@ def run_with_reconnect(sandbox: Sandbox, cmd, envs, logger, max_retries=5):
         cmd,
         background=True,
         envs=envs,
-        timeout=1180,  # about 20 min; was 3600
+        timeout=1440,  # about 24 min; was 3600
         request_timeout=1800,
     )
     pid = handle.pid
@@ -228,7 +228,7 @@ def run_with_reconnect(sandbox: Sandbox, cmd, envs, logger, max_retries=5):
                 # 3. 重连到 sandbox 和进程
                 handle = sandbox.commands.connect(
                     pid,
-                    timeout=1200,
+                    timeout=1440,
                     request_timeout=1800,
                 )
             else:
@@ -314,7 +314,7 @@ def run_workflow(
     cmd = (
         f"python run.py --task-id {task_id} --oss-prefix {oss_config['prefix']} "
         f"--provider-base-url {api_server_url} --provider-model-id {model_path} "
-        f"--agent-timeout-seconds 1100"
+        f"--agent-timeout-seconds 1200"
     )
     envs = {}
     enable_otel = otel_config.pop("enable", False)
@@ -339,13 +339,15 @@ def run_workflow(
         # 注入 OTEL 相关环境变量
         cmd += " --enable-otel"
         envs.update(_setup_otel_envs(otel_config))
-    _, _ = launch_run_py(
+    launch_duration_seconds, _ = launch_run_py(
         sandbox, cmd, oss_config, dashscope_api_key, logger, envs=envs, raise_error=True
     )
+    logger.info(f"Launch duration: {launch_duration_seconds}")
 
-    content = _download_file(sandbox, "/root/dataset.pkl", logger, format="bytes")
-    dataset = pickle.loads(content)
-    return dataset
+    output = _download_file(sandbox, "/root/output.pkl", logger, format="bytes")
+    output = pickle.loads(output)
+    output["launch_duration_seconds"] = launch_duration_seconds
+    return output
 
 
 def _save_and_extract_zip(sandbox: Sandbox, remote_path: str, task_dir: str, logger):

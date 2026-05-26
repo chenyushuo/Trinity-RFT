@@ -1022,6 +1022,7 @@ def main(args=None):  # noqa: C901
 
     try:
         # Step 1. download bench from OSS
+        prepare_start_time = time.perf_counter()
         client = bench_client.BenchmarkClient(oss_prefix=args.oss_prefix)
         client.download_compressed_task(args.task_id, _SCRIPT_DIR)
 
@@ -1108,10 +1109,11 @@ def main(args=None):  # noqa: C901
             ]
             agent_input = agent_input[0]  # TODO: 后续支持 instruction.md 中的多轮对话格式，目前仅取第一段文本作为输入
             log.info("读取 instruction.md，query 长度: %d 字符", len(user_input))
+        prepare_duration = time.perf_counter() - prepare_start_time
 
         # Step 4: 调用 agent API
         log.info("调用 agent API ...")
-        t_start = time.time()
+        t_start = time.perf_counter()
         with trace_span(
             "call_agent", {"session_id": args.session_id, "model_id": args.provider_model_id}
         ):
@@ -1126,12 +1128,13 @@ def main(args=None):  # noqa: C901
                 provider_model_id=args.provider_model_id,
                 timeout_seconds=args.agent_timeout_seconds,
             )
-        duration_seconds = round(time.time() - t_start, 2)
-        log.info("完成调用 agent API，耗时: %.2f 秒", duration_seconds)
+        call_agent_duration = time.perf_counter() - t_start
+        log.info("完成调用 agent API，耗时: %.2f 秒", call_agent_duration)
         if agent_run.timed_out:
             log.warning("Agent 调用因超时结束，后续继续导出 session/trajectory")
 
         # Step 5: 读取 session JSON 并提取 trajectories
+        extract_start_time = time.perf_counter()
         test_dir = os.path.join(_SCRIPT_DIR, "tests")
         os.makedirs(test_dir, exist_ok=True)
 
@@ -1165,6 +1168,7 @@ def main(args=None):  # noqa: C901
         log.info(f"Agent 最终回复文本:\n{final_text}\n")
 
         trajectories = extract_trajectories(session_data)
+        extract_duration = time.perf_counter() - extract_start_time
 
         if not args.evaluation:
             with trace_span("export_training_data", {"trajectories_length": len(trajectories)}):
@@ -1176,6 +1180,9 @@ def main(args=None):  # noqa: C901
                     session_data=session_data,
                     input_answer=input_answer,
                     timed_out=agent_run.timed_out,
+                    prepare_duration=prepare_duration,
+                    call_agent_duration=call_agent_duration,
+                    extract_duration=extract_duration,
                 )
             return
 
@@ -1325,7 +1332,7 @@ def main(args=None):  # noqa: C901
                         "agent_timed_out": agent_run.timed_out,
                         "final_text": final_text,
                         "status": "completed",
-                        "duration_seconds": duration_seconds,
+                        "duration_seconds": call_agent_duration,
                         "steps": len(structured_trajectory),
                         "query": user_input,
                         "trajectory": structured_trajectory,

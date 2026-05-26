@@ -80,7 +80,7 @@ buffer:
           sigma: 0.5
 explorer:
   runner_per_model: ${oc.env:RUNNER_PER_MODEL,32}
-  max_timeout: 400
+  max_timeout: 500
   max_retry_times: 2
   max_repeat_times_per_runner: 1
   rollout_model:

@@ -3,6 +3,7 @@ import logging
 import os
 import pickle
 import sys
+import time
 from urllib import request as urllib_request
 
 import numpy as np
@@ -162,7 +163,11 @@ def export_training_data(
     session_data=None,
     input_answer=None,
     timed_out: bool = False,
+    prepare_duration: float = 0.0,
+    call_agent_duration: float = 0.0,
+    extract_duration: float = 0.0,
 ) -> None:
+    start_time = time.perf_counter()
     if timed_out:
         reward, judge_reason = 0.0, "call_agent 超时结束，跳过 LLM judge"
     else:
@@ -186,10 +191,18 @@ def export_training_data(
         except Exception as judge_exc:
             # 判断出错时保守处理：视为失败
             reward, judge_reason = 0.0, f"LLM判断异常(失败): {judge_exc}"
-    log.info("LLM judge result: %s, reason: %s", reward, judge_reason)
+    end = time.perf_counter()
+    llm_judge_duration = end - start_time
+    log.info(
+        "LLM judge result: %s, reason: %s, duration: %.2f seconds",
+        reward,
+        judge_reason,
+        llm_judge_duration,
+    )
 
     dataset = []
     last_full_token_ids = last_full_length = None
+    total_steps = len(trajectories)
     for trajectory in trajectories:
         meesages = trajectory["messages"]
         logprobs = trajectory["logprobs"]
@@ -232,5 +245,13 @@ def export_training_data(
         last_full_token_ids = np.array(prompt_token_ids + token_ids)
         last_full_length = len(last_full_token_ids)
 
-    with open(os.path.join(_SCRIPT_DIR, "dataset.pkl"), "wb") as f:
-        pickle.dump(dataset, f)
+    output = {
+        "dataset": dataset,
+        "total_steps": total_steps,
+        "prepare_duration": prepare_duration,
+        "call_agent_duration": call_agent_duration,
+        "extract_duration": extract_duration,
+        "llm_judge_duration": llm_judge_duration,
+    }
+    with open(os.path.join(_SCRIPT_DIR, "output.pkl"), "wb") as f:
+        pickle.dump(output, f)

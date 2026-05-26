@@ -31,7 +31,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
             run_workflow,
         )
 
-        start_time = time.time()
+        start_time = time.perf_counter()
         sandbox_id = self.task.workflow_args.get("sandbox_id", None)
         token = self.task.workflow_args["token"]
         domain = self.task.workflow_args["domain"]
@@ -47,7 +47,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
         api_server_url = f"{self.model.api_address}/v1"
         model_path = self.model.model_name
         try:
-            dataset = run_workflow(
+            output = run_workflow(
                 sandbox,
                 task_id,
                 oss_config,
@@ -62,9 +62,18 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
             raise e
         finally:
             sandbox.kill()
+        end_time = time.perf_counter()
+        duration = end_time - start_time
 
         exps = []
         render = vLLMMultiModalRender(model_path=model_path)
+        dataset = output["dataset"]
+        total_steps = output["total_steps"]
+        launch_duration_seconds = output["launch_duration_seconds"]
+        prepare_duration = output["prepare_duration"]
+        call_agent_duration = output["call_agent_duration"]
+        extract_duration = output["extract_duration"]
+        llm_judge_duration = output["llm_judge_duration"]
         for data in dataset:
             prompt_token_ids = torch.tensor(data["prompt_token_ids"])
             response_token_ids = torch.tensor(data["token_ids"])
@@ -75,6 +84,13 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
             reward = float(data.get("reward", 0.0))
             metrics = {
                 "reward": reward,
+                "total_steps": total_steps,
+                "sandbox_duration": duration,
+                "launch_duration_seconds": launch_duration_seconds,
+                "prepare_duration": prepare_duration,
+                "call_agent_duration": call_agent_duration,
+                "extract_duration": extract_duration,
+                "llm_judge_duration": llm_judge_duration,
             }
             multi_modal_inputs = render.build_mm_input_for_training(
                 messages=data["messages"],
@@ -94,8 +110,14 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
         del render
 
         self.logger.info(
-            f"Workflow finished in {time.time() - start_time:.2f} seconds. Sandbox {'created' if created else 'connected'} "
-            f"(ID: {sandbox_id}). Reward = {reward}. Collected {len(exps)} experiences."
+            f"Workflow finished in {time.perf_counter() - start_time:.2f} seconds. "
+            f"Sandbox duration = {duration:.2f} seconds. "
+            f"Launch duration = {launch_duration_seconds:.2f} seconds. "
+            f"Prepare duration = {prepare_duration:.2f} seconds. "
+            f"Call agent duration = {call_agent_duration:.2f} seconds. "
+            f"Extract duration = {extract_duration:.2f} seconds. "
+            f"LLM judge duration = {llm_judge_duration:.2f} seconds. "
+            f"Reward = {reward}. Total steps = {total_steps}. Collected {len(exps)} experiences."
         )
 
         return exps
