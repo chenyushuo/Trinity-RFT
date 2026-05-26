@@ -2,10 +2,9 @@ import time
 from typing import List, Optional
 
 import torch
-import transformers
 
 from trinity.common.experience import Experience
-from trinity.common.models.mm_utils import ClientMultiModalProcessor
+from trinity.common.models.mm_utils import vLLMMultiModalRender
 from trinity.common.models.model import ModelWrapper
 from trinity.common.workflows import WORKFLOWS
 from trinity.common.workflows.workflow import MultiTurnWorkflow, Task
@@ -65,8 +64,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
             sandbox.kill()
 
         exps = []
-        processor = None
-        vllm_processor = ClientMultiModalProcessor(model_path=model_path)
+        render = vLLMMultiModalRender(model_path=model_path)
         for data in dataset:
             prompt_token_ids = torch.tensor(data["prompt_token_ids"])
             response_token_ids = torch.tensor(data["token_ids"])
@@ -78,28 +76,10 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
             metrics = {
                 "reward": reward,
             }
-
-            messages = data["messages"]
-            _, mm_data, _ = vllm_processor.process_messages(messages)
-            if mm_data is not None:
-                if processor is None:
-                    processor = transformers.AutoProcessor.from_pretrained(model_path)
-                multi_modal_inputs = {}
-                # outputs_kwargs = processor._merge_kwargs(
-                #     Qwen3VLProcessorKwargs,
-                #     tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
-                #     return_tensors="pt",
-                # )
-                if images := mm_data.get("image", None):
-                    images = [img.media for img in images]
-                    image_inputs = processor.image_processor(images=images, return_tensors="pt")
-                    multi_modal_inputs.update(image_inputs)
-                if videos := mm_data.get("video", None):
-                    videos = [vid.media for vid in videos]
-                    video_inputs = processor.video_processor(videos=videos, return_tensors="pt")
-                    multi_modal_inputs.update(video_inputs)
-            else:
-                multi_modal_inputs = None
+            multi_modal_inputs = render.build_mm_input_for_training(
+                messages=data["messages"],
+                input_ids=token_ids.tolist(),
+            )
 
             exp = Experience(
                 tokens=token_ids,
@@ -111,7 +91,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
                 multi_modal_inputs=multi_modal_inputs,
             )
             exps.append(exp)
-        del processor, vllm_processor
+        del render
 
         self.logger.info(
             f"Workflow finished in {time.time() - start_time:.2f} seconds. Sandbox {'created' if created else 'connected'} "

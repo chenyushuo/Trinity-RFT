@@ -12,8 +12,9 @@ from sqlalchemy.orm import sessionmaker
 
 from trinity.buffer.schema import FORMATTER, init_engine
 from trinity.buffer.schema.formatter import TaskFormatter
-from trinity.buffer.utils import retry_session
+from trinity.buffer.utils import run_with_retry_session
 from trinity.common.config import StorageConfig
+from trinity.common.constants import MAX_EXP_BYTES_ENV_VAR
 from trinity.common.experience import Experience
 from trinity.common.rewards import REWARD_FUNCTIONS
 from trinity.common.workflows import WORKFLOWS, Task
@@ -100,7 +101,7 @@ class SQLExperienceStorage(SQLStorage):
         self.batch_size = config.batch_size
         self.enable_replay = config.replay_buffer is not None and config.replay_buffer.enable
         self.max_experience_bytes = int(
-            os.getenv("TRINITY_SQL_MAX_EXPERIENCE_BYTES", str(32 * 1024 * 1024))
+            os.getenv(MAX_EXP_BYTES_ENV_VAR, 1024 * 1024 * 32)  # default 32MB
         )
         # TODO: optimize the following logic
         if config.schema_type == "experience":
@@ -111,46 +112,32 @@ class SQLExperienceStorage(SQLStorage):
             self._read_method = self._read_fifo
 
     def write(self, data: List[Experience]) -> None:
-        experience_models = []
-        skipped = 0
-        for exp in data:
-            model = self.table_model_cls.from_experience(exp)
-            payload = model.experience_bytes
-            if (
-                self.max_experience_bytes > 0
-                and payload is not None
-                and len(payload) > self.max_experience_bytes
-            ):
-                skipped += 1
-                self.logger.warning(
-                    "Skip oversized experience: size=%s bytes > limit=%s bytes (task_id=%s run_id=%s msg_id=%s)",
-                    len(payload),
-                    self.max_experience_bytes,
-                    str(exp.eid.task),
-                    exp.eid.run,
-                    str(exp.eid.suffix),
-                )
-                continue
-            experience_models.append(model)
-
-        if not experience_models:
-            self.logger.warning(
-                "Skip SQL write: no valid experiences in batch. total=%s skipped=%s limit=%s",
-                len(data),
-                skipped,
-                self.max_experience_bytes,
-            )
-            return
-
-        with retry_session(self.session, self.max_retry_times, self.max_retry_interval) as session:
+        def operation(session):
+            experience_models = []
+            for exp in data:
+                exp_model = self.table_model_cls.from_experience(exp)
+                # TODO: this is a temporary solution to avoid OOM when loading large experience into memory,
+                # we need a better way to handle this in the future
+                if (
+                    self.max_experience_bytes > 0
+                    and exp_model.experience_bytes is not None
+                    and len(exp_model.experience_bytes) > self.max_experience_bytes
+                ):
+                    self.logger.warning(
+                        f"Experience {exp_model.id} size {exp_model.experience_bytes} bytes exceeds the "
+                        f"max_experience_bytes {self.max_experience_bytes} bytes, it may cause OOM when loading into memory."
+                    )
+                    continue
+                experience_models.append(exp_model)
             session.add_all(experience_models)
-        self.logger.info(
-            "Write %s experiences to SQL storage (input=%s skipped=%s limit=%s).",
-            len(experience_models),
-            len(data),
-            skipped,
-            self.max_experience_bytes,
+
+        run_with_retry_session(
+            self.session,
+            operation,
+            self.max_retry_times,
+            self.max_retry_interval,
         )
+        self.logger.info(f"Write {len(data)} experiences to SQL storage.")
 
     def _read_fifo(self, batch_size: int) -> List[Experience]:
         """Read experiences in FIFO order."""
@@ -164,10 +151,8 @@ class SQLExperienceStorage(SQLStorage):
                     f"Max read timeout reached ({self.max_timeout} s), only get {len(exp_list)} experiences, stopping..."
                 )
                 raise StopIteration()
-            with retry_session(
-                self.session, self.max_retry_times, self.max_retry_interval
-            ) as session:
-                # get a batch of experiences from the database
+
+            def operation(session):
                 experiences = (
                     session.query(self.table_model_cls)
                     .filter(self.table_model_cls.id > self.offset)
@@ -175,10 +160,23 @@ class SQLExperienceStorage(SQLStorage):
                     .limit(batch_size - len(exp_list))
                     .all()
                 )
-                if experiences:
-                    self.offset = experiences[-1].id
-                    start_time = time.time()
-                exp_list.extend([self.table_model_cls.to_experience(exp) for exp in experiences])
+                if not experiences:
+                    return [], None
+                return (
+                    [self.table_model_cls.to_experience(exp) for exp in experiences],
+                    experiences[-1].id,
+                )
+
+            experiences, next_offset = run_with_retry_session(
+                self.session,
+                operation,
+                self.max_retry_times,
+                self.max_retry_interval,
+            )
+            if next_offset is not None:
+                self.offset = next_offset
+                start_time = time.time()
+            exp_list.extend(experiences)
             if len(exp_list) < batch_size:
                 self.logger.info(f"Waiting for {batch_size - len(exp_list)} more experiences...")
                 time.sleep(1)
@@ -196,9 +194,8 @@ class SQLExperienceStorage(SQLStorage):
                     f"Max read timeout reached ({self.max_timeout} s), only get {latest_size} experiences, stopping..."
                 )
                 raise StopIteration()
-            with retry_session(
-                self.session, self.max_retry_times, self.max_retry_interval
-            ) as session:
+
+            def operation(session):
                 query = session.query(self.table_model_cls)
                 if min_model_version > 0:
                     query = query.filter(self.table_model_cls.model_version >= min_model_version)
@@ -213,21 +210,32 @@ class SQLExperienceStorage(SQLStorage):
                     .all()
                 )
                 if len(experiences) != batch_size:
-                    if latest_size != len(experiences):
-                        latest_size = len(experiences)
-                        start_time = time.time()
-                else:
-                    ids = [exp.id for exp in experiences]
-                    session.query(self.table_model_cls).filter(
-                        self.table_model_cls.id.in_(ids)
-                    ).update(
-                        {self.table_model_cls.consumed: self.table_model_cls.consumed + 1},
-                        synchronize_session=False,
-                    )
-                    exp_list.extend(
-                        [self.table_model_cls.to_experience(exp) for exp in experiences]
-                    )
-                    break
+                    return len(experiences), False, []
+
+                ids = [exp.id for exp in experiences]
+                session.query(self.table_model_cls).filter(self.table_model_cls.id.in_(ids)).update(
+                    {self.table_model_cls.consumed: self.table_model_cls.consumed + 1},
+                    synchronize_session=False,
+                )
+                return (
+                    len(experiences),
+                    True,
+                    [self.table_model_cls.to_experience(exp) for exp in experiences],
+                )
+
+            latest_batch_size, has_full_batch, experiences = run_with_retry_session(
+                self.session,
+                operation,
+                self.max_retry_times,
+                self.max_retry_interval,
+            )
+            if not has_full_batch:
+                if latest_size != latest_batch_size:
+                    latest_size = latest_batch_size
+                    start_time = time.time()
+            else:
+                exp_list.extend(experiences)
+                break
 
             self.logger.info(f"Waiting for {batch_size - len(exp_list)} more experiences...")
             time.sleep(1)
@@ -279,9 +287,16 @@ class SQLTaskStorage(SQLStorage):
             self.total_samples = float("inf")
 
     def write(self, data: List[Dict]) -> None:
-        with retry_session(self.session, self.max_retry_times, self.max_retry_interval) as session:
+        def operation(session):
             tasks = [self.table_model_cls.from_dict(item) for item in data]
             session.add_all(tasks)
+
+        run_with_retry_session(
+            self.session,
+            operation,
+            self.max_retry_times,
+            self.max_retry_interval,
+        )
 
     def read(self, batch_size: Optional[int] = None) -> List[Task]:
         if self.stopped:
@@ -289,7 +304,8 @@ class SQLTaskStorage(SQLStorage):
         if self.offset > self.total_samples:
             raise StopIteration()
         batch_size = self.batch_size if batch_size is None else batch_size
-        with retry_session(self.session, self.max_retry_times, self.max_retry_interval) as session:
+
+        def operation(session):
             query = (
                 session.query(self.table_model_cls)
                 .filter(self.table_model_cls.id > self.offset)
@@ -301,8 +317,15 @@ class SQLTaskStorage(SQLStorage):
                 raise StopIteration()
             if not self.is_eval and len(results) < batch_size:
                 raise StopIteration()
-            self.offset = results[-1].id
-            return [self.formatter.format(item.raw_task) for item in results]
+            return results[-1].id, [self.formatter.format(item.raw_task) for item in results]
+
+        self.offset, tasks = run_with_retry_session(
+            self.session,
+            operation,
+            self.max_retry_times,
+            self.max_retry_interval,
+        )
+        return tasks
 
     @classmethod
     def load_from_dataset(cls, dataset: Dataset, config: StorageConfig) -> "SQLTaskStorage":

@@ -1,42 +1,59 @@
 import time
 import traceback
 from contextlib import contextmanager
+from typing import Any, Callable
+
+from sqlalchemy.orm import Session
 
 from trinity.utils.log import get_logger
 
 
 @contextmanager
 def retry_session(session_maker, max_retry_times: int = 2, max_retry_interval: float = 1.0):
-    """A Context manager for retrying session."""
-    logger = get_logger(__name__)
-    retries = max(1, int(max_retry_times))
+    """A context manager for a single session lifecycle."""
+    del max_retry_times, max_retry_interval
     session = session_maker()
-
     try:
         yield session
-    except StopIteration as e:
-        raise e
-    except Exception as e:
-        # Exception raised inside with-body: rollback once and propagate.
+        session.commit()
+    except StopIteration:
+        raise
+    except Exception:
         session.rollback()
-        raise e
-    else:
-        last_exception = None
-        for attempt in range(retries):
-            try:
-                session.commit()
-                return
-            except Exception as e:
-                last_exception = e
-                trace_str = traceback.format_exc()
-                session.rollback()
-                logger.warning(
-                    f"Attempt {attempt + 1} failed, retrying in {max_retry_interval} seconds..."
-                )
-                logger.warning(f"trace = {trace_str}")
-                if attempt < retries - 1:
-                    time.sleep(max_retry_interval)
-        logger.error("Max retry attempts reached, raising exception.")
-        raise last_exception
+        raise
     finally:
         session.close()
+
+
+def run_with_retry_session(
+    session_maker,
+    operation: Callable[[Session], Any],
+    max_retry_times: int = 2,
+    max_retry_interval: float = 1.0,
+) -> Any:
+    """Run a database operation with session retry around a single transaction."""
+    logger = get_logger(__name__)
+    max_retry_times = max(1, max_retry_times)
+
+    for attempt in range(max_retry_times):
+        try:
+            with retry_session(session_maker) as session:
+                return operation(session)
+        except StopIteration:
+            raise
+        except Exception as exc:
+            trace_str = traceback.format_exc()
+            logger.warning(
+                "Attempt %s failed, retrying in %s seconds...",
+                attempt + 1,
+                max_retry_interval,
+            )
+            logger.warning("trace = %s", trace_str)
+            if attempt < max_retry_times - 1:
+                time.sleep(max_retry_interval)
+                continue
+
+            logger.error("Max retry attempts reached, raising exception.")
+            raise exc
+
+    raise RuntimeError("run_with_retry_session exhausted without raising")

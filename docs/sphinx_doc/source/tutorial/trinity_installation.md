@@ -10,8 +10,8 @@ For installing Trinity-RFT, you have three options: from source (recommended for
 Make sure your system meets these requirements:
 
 - **Python**: 3.10 – 3.12
-- **CUDA**: 12.8 or higher
-- **GPUs**: At least one NVIDIA GPU with [compute capability](https://developer.nvidia.com/cuda/gpus) 8.0 or higher (e.g., RTX 30 series, A100, H100)
+- **CUDA**: 13.0 or higher
+- **GPUs**: At least one NVIDIA GPU with [compute capability](https://developer.nvidia.com/cuda/gpus) 9.0 or higher (e.g., RTX 40 series, H100)
 
 ### If you don’t have GPUs or prefer not to use them
 
@@ -126,7 +126,7 @@ cd Trinity-RFT
 
 # Build the Docker image
 ## Tip: You can modify the Dockerfile to add mirrors or set API keys
-docker build -f scripts/docker/Dockerfile.uv -t trinity-rft:latest .
+docker build -f docker/Dockerfile -t trinity-rft:latest .
 
 # Run the container, replacing <path_to_your_data_and_checkpoints> with your actual path
 docker run -it \

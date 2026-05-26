@@ -10,8 +10,8 @@
 请确保您的系统满足以下要求：
 
 - **Python**：3.10 – 3.12
-- **CUDA**：12.8 或更高版本
-- **GPU**：至少一块 [compute capability](https://developer.nvidia.com/cuda/gpus) 为 8.0 或更高的 NVIDIA GPU（例如 RTX 30 系列、A100、H100）
+- **CUDA**：13.0 或更高版本
+- **GPU**：至少一块 [compute capability](https://developer.nvidia.com/cuda/gpus) 为 9.0 或更高的 NVIDIA GPU（例如 RTX 40 系列、H100）
 
 ### 如果您没有 GPU 或不希望使用 GPU
 
@@ -127,7 +127,7 @@ cd Trinity-RFT
 
 # 构建 Docker 镜像
 ## 提示：可根据需要修改 Dockerfile 添加镜像源或设置 API 密钥
-docker build -f scripts/docker/Dockerfile.uv -t trinity-rft:latest .
+docker build -f docker/Dockerfile -t trinity-rft:latest .
 
 # 运行容器，请将 <path_to_your_data_and_checkpoints> 替换为实际需要挂载的路径
 docker run -it \

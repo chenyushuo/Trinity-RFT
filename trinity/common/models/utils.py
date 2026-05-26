@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import re
+from copy import deepcopy
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
@@ -42,7 +43,7 @@ def tokenize_and_mask_messages_hf(
     tools: Optional[List[dict]] = None,
     chat_template: Optional[str] = None,
     enable_thinking: Optional[bool] = None,
-) -> Tuple[dict[str, torch.Tensor], int]:
+) -> dict[str, torch.Tensor]:
     """Calculate the assistant token mask with `chat_template`.
 
     Args:
@@ -52,8 +53,9 @@ def tokenize_and_mask_messages_hf(
         chat_template (str): The chat template with `{% generation %}` symbol.
 
     Returns:
-
-        `int`: Prompt length.
+        `dict[str, torch.Tensor]`: A token dictionary returned by
+            `apply_chat_template`, containing at least `input_ids` and
+            `assistant_masks`.
     """
     common_kwargs = _get_common_kwargs(
         tokenizer,
@@ -78,7 +80,7 @@ def tokenize_and_mask_messages_default(
     tools: Optional[List[dict]] = None,
     chat_template: Optional[str] = None,
     enable_thinking: Optional[bool] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, int]:
+) -> dict[str, torch.Tensor]:
     """Calculate the assistant token mask.
 
     Args:
@@ -88,9 +90,8 @@ def tokenize_and_mask_messages_default(
         chat_template (str): The chat template with `{% generation %}` symbol.
 
     Returns:
-        `torch.Tensor`: The token_ids (sequence_length)
-        `torch.Tensor`: Assistant_masks (sequence_length).
-        `int`: Prompt length.
+        `dict[str, torch.Tensor]`: A token dictionary containing
+            `input_ids` and `assistant_masks`.
 
     Note:
         This method is based on the assumption that as the number of chat rounds increases,
@@ -129,9 +130,10 @@ def tokenize_and_mask_messages_default(
     token_dict = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=False,
-        **common_kwargs,
+        return_tensors="pt",
+        **deepcopy(common_kwargs),
     )
-    assistant_masks = torch.zeros(len(token_dict["input_ids"][0]), dtype=torch.int)
+    assistant_masks = torch.zeros_like(token_dict["input_ids"]).squeeze()
 
     if len(generation_messages) != 0:
         first_generation_message_empty_flag = len(generation_messages[0]) == 0
@@ -141,12 +143,12 @@ def tokenize_and_mask_messages_default(
         prompt_token_ids_list = tokenizer.apply_chat_template(
             generation_messages,
             add_generation_prompt=True,
-            **common_kwargs,
+            **deepcopy(common_kwargs),
         )["input_ids"]
         response_token_ids_list = tokenizer.apply_chat_template(
             response_messages,
             add_generation_prompt=False,
-            **common_kwargs,
+            **deepcopy(common_kwargs),
         )["input_ids"]
         if first_generation_message_empty_flag:
             # the first message is from assistant, so set the first prompt_token_ids to empty
@@ -160,10 +162,8 @@ def tokenize_and_mask_messages_default(
             assistant_masks[prompt_len:response_len] = 1
 
     token_dict.pop("attention_mask", None)  # remove attention mask if exists
-    output = {"assistant_masks": assistant_masks.unsqueeze(0)}
-    for key, value in token_dict.items():
-        output[key] = torch.tensor(value)
-    return output
+    token_dict["assistant_masks"] = assistant_masks.unsqueeze(0)
+    return token_dict
 
 
 def get_action_mask_method(chat_template: Optional[str] = None) -> Callable:
@@ -263,7 +263,10 @@ def load_state_dict(checkpoint_dir: str, config: TrainerConfig) -> Union[dict, T
             ):
                 return "megatron", checkpoint_dir
             else:  # hf checkpointing
-                return load_huggingface_state_dict(os.path.join(checkpoint_dir, "huggingface"))
+                return load_huggingface_state_dict(
+                    os.path.join(checkpoint_dir, "huggingface"),
+                    trust_remote_code=config.trust_remote_code,
+                )
         else:
             raise ValueError(f"Unsupported strategy: {strategy}")
     else:
@@ -339,10 +342,19 @@ def load_fsdp_state_dict_from_verl_checkpoint(checkpoint_path: str) -> dict:  # 
     return merged_state_dict
 
 
-def load_huggingface_state_dict(checkpoint_path: str):
+def load_huggingface_state_dict(checkpoint_path: str, trust_remote_code: bool = False):
     import transformers
+    from verl.utils.model import get_hf_auto_model_class
 
-    model = transformers.AutoModelForCausalLM.from_pretrained(checkpoint_path)
+    model_config = transformers.AutoConfig.from_pretrained(
+        checkpoint_path,
+        trust_remote_code=trust_remote_code,
+    )
+    auto_model_cls = get_hf_auto_model_class(model_config)
+    model = auto_model_cls.from_pretrained(
+        checkpoint_path,
+        trust_remote_code=trust_remote_code,
+    )
     return model.state_dict()
 
 
