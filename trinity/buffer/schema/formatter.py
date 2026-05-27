@@ -5,7 +5,6 @@ from typing import Dict, List, Optional
 from trinity.common.config import FormatConfig, StorageConfig
 from trinity.common.constants import PromptType
 from trinity.common.experience import Experience
-from trinity.common.models.mm_utils import processor_or_tokenizer_cls
 from trinity.common.models.utils import get_action_mask_method
 from trinity.common.rewards import REWARD_FUNCTIONS
 from trinity.common.workflows import WORKFLOWS, Task
@@ -93,6 +92,8 @@ class SFTFormatter(ExperienceFormatter):
     """
 
     def __init__(self, tokenizer_path: str, format_config: FormatConfig):
+        from trinity.common.models.mm_utils import processor_or_tokenizer_cls
+
         self.logger = get_logger("sft_dataset_formatter", in_ray_actor=True)
         self.prompt_type = format_config.prompt_type
         self.enable_concatenated_multi_turn = format_config.enable_concatenated_multi_turn
@@ -261,6 +262,8 @@ class DPOFormatter(ExperienceFormatter):
     """
 
     def __init__(self, tokenizer_path: str, format_config: FormatConfig):
+        from trinity.common.models.mm_utils import processor_or_tokenizer_cls
+
         tokenizer_cls = processor_or_tokenizer_cls(tokenizer_path)
         self.processor_or_tokenizer = tokenizer_cls.from_pretrained(tokenizer_path)
         self.prompt_type = format_config.prompt_type
