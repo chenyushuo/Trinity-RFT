@@ -4,8 +4,14 @@ group: ${oc.env:EXP_DATE}-${oc.env:EXP_SOURCE}
 name: ${oc.env:EXP_NAME}
 checkpoint_root_dir: ${oc.env:TRINITY_CHECKPOINT_ROOT_DIR,./checkpoints}
 algorithm:
-  algorithm_type: ${oc.env:ALGORITHM_TYPE,grpo}
+  algorithm_type: grpo
   repeat_times: 8
+  policy_loss_fn: rec
+  policy_loss_fn_args:
+    epsilon_low: 6e-4
+    epsilon_high: 8e-4
+    clip_mode: "gspo-one-side"
+    weight: "gspo_importance_sampling"
   optimizer:
     lr: ${oc.env:LR,1e-6}
     lr_scheduler_type: ${oc.env:LR_SCHEDULER_TYPE,cosine}
@@ -55,7 +61,7 @@ buffer:
           bucket_name: ${oc.env:OSS_BUCKET_NAME,"copaw-dataset"}
           prefix: ${oc.env:OSS_PREFIX,"data/0318_train_tasks_compressed/"}
         otel:
-          enable: ${oc.env:OTEL_ENABLE,False}
+          enable: ${oc.env:OTEL_ENABLE,false}
           endpoint: ${oc.env:OTEL_EXPORTER_OTLP_ENDPOINT,null}
           service_name: ${oc.env:OTEL_SERVICE_NAME,qwenpaw-run}
           arms_license_key: ${oc.env:OTEL_ARMS_LICENSE_KEY,null}

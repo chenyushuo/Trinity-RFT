@@ -15,11 +15,7 @@ from setup_provider import (
 )
 
 RL_PROVIDER_NAME = "rl-server"
-_STOP_ENDPOINTS = (
-    "/api/console/chat/stop",
-    "/api/agent/console/chat/stop",
-    "/api/agents/default/console/chat/stop",
-)
+_STOP_ENDPOINTS = ("/api/console/chat/stop",)
 _STOP_WAIT_SECONDS = 15.0
 
 
@@ -363,6 +359,8 @@ def _parse_sse_line(raw_line: str, log: logging.Logger) -> dict[str, Any] | None
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        if len(text) > 200:
+            text = text[:200] + "..."
         log.warning("failed to parse stream chunk: %r", text)
         return None
 
@@ -452,44 +450,46 @@ def _consume_stream(response: requests.Response, log: logging.Logger) -> _Stream
 
 def _request_stop(url: str, session_id: str, user_id: str, log: logging.Logger) -> bool:
     chat_id = _resolve_chat_id(url, session_id, user_id, log)
+    if chat_id is None:
+        log.warning("failed to resolve chat_id for session=%s", session_id)
+        return False
     stop_attempts: list[tuple[str, str, bool]] = []
-    for target in _stop_targets(session_id, chat_id):
-        params = {"chat_id": target}
-        for endpoint in _STOP_ENDPOINTS:
-            stop_url = f"{url}{endpoint}"
-            try:
-                response = requests.post(stop_url, params=params, timeout=10)
-                if response.status_code == 404:
-                    continue
-                response.raise_for_status()
-                payload = response.json() if response.content else {}
-                stopped = bool(payload.get("stopped"))
-                stop_attempts.append((endpoint, target, stopped))
-                log.info(
-                    "sent stop signal for session=%s target=%s endpoint=%s stopped=%s",
-                    session_id,
-                    target,
-                    endpoint,
-                    stopped,
-                )
-                if stopped:
-                    return True
-            except requests.RequestException as exc:
-                log.warning(
-                    "failed to send stop signal for session=%s target=%s via %s: %s",
-                    session_id,
-                    target,
-                    endpoint,
-                    exc,
-                )
-            except ValueError as exc:
-                log.warning(
-                    "stop endpoint returned non-json response for session=%s target=%s via %s: %s",
-                    session_id,
-                    target,
-                    endpoint,
-                    exc,
-                )
+    params = {"chat_id": chat_id}
+    for endpoint in _STOP_ENDPOINTS:
+        stop_url = f"{url}{endpoint}"
+        try:
+            response = requests.post(stop_url, params=params, timeout=10)
+            if response.status_code == 404:
+                continue
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+            stopped = bool(payload.get("stopped"))
+            stop_attempts.append((endpoint, chat_id, stopped))
+            log.info(
+                "sent stop signal for session=%s target=%s endpoint=%s stopped=%s",
+                session_id,
+                chat_id,
+                endpoint,
+                stopped,
+            )
+            if stopped:
+                return True
+        except requests.RequestException as exc:
+            log.warning(
+                "failed to send stop signal for session=%s target=%s via %s: %s",
+                session_id,
+                chat_id,
+                endpoint,
+                exc,
+            )
+        except ValueError as exc:
+            log.warning(
+                "stop endpoint returned non-json response for session=%s target=%s via %s: %s",
+                session_id,
+                chat_id,
+                endpoint,
+                exc,
+            )
 
     if stop_attempts:
         log.warning("all stop attempts returned stopped=false for session=%s", session_id)
@@ -537,7 +537,7 @@ def call_agent(
         response: requests.Response | None = None
         try:
             response = requests.post(
-                f"{url}/api/agent/process",
+                f"{url}/api/console/chat",
                 json=payload,
                 headers=headers,
                 stream=True,

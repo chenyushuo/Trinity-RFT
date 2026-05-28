@@ -25,8 +25,8 @@ class GraderScoreEntry:
 class RewardPolicy:
     """RL reward 聚合与惩罚策略（可通过环境变量微调部分参数）。"""
 
-    trajectory_blend_alpha: float = 0.2
-    trajectory_base_floor: float = 0.8
+    trajectory_blend_alpha: float = 0.8
+    trajectory_base_floor: float = 0.2
     use_search_geometric_mean: bool = True
     baseline_subtract: float = 0.0
     hard_terminated_cap: float = 0.0
@@ -60,8 +60,8 @@ def _env_float(name: str, default: float) -> float:
 def load_reward_policy() -> RewardPolicy:
     """从环境变量加载 reward 策略，未设置时使用保守默认值。"""
     return RewardPolicy(
-        trajectory_blend_alpha=_env_float("JUDGE_TRAJ_BLEND_ALPHA", 0.2),
-        trajectory_base_floor=_env_float("JUDGE_TRAJ_BASE_FLOOR", 0.8),
+        trajectory_blend_alpha=_env_float("JUDGE_TRAJ_BLEND_ALPHA", 0.8),
+        trajectory_base_floor=_env_float("JUDGE_TRAJ_BASE_FLOOR", 0.2),
         baseline_subtract=_env_float("JUDGE_REWARD_BASELINE_SUBTRACT", 0.0),
         step_soft_limit=int(_env_float("JUDGE_STEP_SOFT_LIMIT", 50)),
         step_hard_limit=int(_env_float("JUDGE_STEP_HARD_LIMIT", 100)),
@@ -194,10 +194,12 @@ def aggregate_grader_scores(
             traj = weighted_mean(process)
             floor = policy.trajectory_base_floor
             alpha = policy.trajectory_blend_alpha
-            final = base * (floor + alpha * traj)
+            traj_coeff = floor + alpha * traj
+            final = base * traj_coeff
             detail = (
                 f"base={base:.4f}({agg_mode}), traj={traj:.4f}, "
-                f"blend={floor:.2f}+{alpha:.2f}*traj→{final:.4f}"
+                f"traj_coeff={floor:.2f}+{alpha:.2f}*traj={traj_coeff:.2f}, "
+                f"final={final:.4f}"
             )
         else:
             final = base
@@ -241,9 +243,7 @@ def finalize_reward(
             if steps > policy.step_hard_limit
             else f"{policy.step_soft_limit}-{policy.step_hard_limit}"
         )
-        penalty_lines.append(
-            f"steps={steps}({tier}), step_penalty×{1.0 - step_penalty:.2f}"
-        )
+        penalty_lines.append(f"steps={steps}({tier}), step_penalty×{1.0 - step_penalty:.2f}")
 
     if any_high_variance:
         multiplier *= policy.high_variance_multiplier

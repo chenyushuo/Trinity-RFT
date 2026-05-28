@@ -74,6 +74,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
         call_agent_duration = output["call_agent_duration"]
         extract_duration = output["extract_duration"]
         llm_judge_duration = output["llm_judge_duration"]
+        inner_metrics = output["metrics"]
         for data in dataset:
             prompt_token_ids = torch.tensor(data["prompt_token_ids"])
             response_token_ids = torch.tensor(data["token_ids"])
@@ -92,6 +93,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
                 "extract_duration": extract_duration,
                 "llm_judge_duration": llm_judge_duration,
             }
+            metrics.update(inner_metrics)
             multi_modal_inputs = render.build_mm_input_for_training(
                 messages=data["messages"],
                 input_ids=token_ids.tolist(),

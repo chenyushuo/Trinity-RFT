@@ -16,8 +16,8 @@ from otel_init import trace_span
 try:
     from judge_reward import (
         DEFAULT_REWARD_POLICY,
-        GraderScoreEntry,
         PROCESS_EVALUATORS,
+        GraderScoreEntry,
         RewardPolicy,
         aggregate_grader_scores,
         finalize_reward,
@@ -25,8 +25,8 @@ try:
 except ImportError:
     from .judge_reward import (  # type: ignore[no-redef]
         DEFAULT_REWARD_POLICY,
-        GraderScoreEntry,
         PROCESS_EVALUATORS,
+        GraderScoreEntry,
         RewardPolicy,
         aggregate_grader_scores,
         finalize_reward,
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from copaw_eval import (
+        evaluate_by_script,
         evaluate_correctness,
         evaluate_file_correctness,
         evaluate_safety_trajectory,
@@ -47,6 +48,7 @@ try:
     )
 except ImportError:
     from .copaw_eval import (  # type: ignore[no-redef]
+        evaluate_by_script,
         evaluate_correctness,
         evaluate_file_correctness,
         evaluate_safety_trajectory,
@@ -77,35 +79,11 @@ class GraderSpec:
 
 
 PREFIX_ALIASES: Dict[str, str] = {
-    "search": "search",
-    "honey": "honey",
-    "mat": "mat",
-    "mm-tool": "mm-tool",
     "mm_tool": "mm-tool",
-    "screen": "screen",
-    "safety": "safety",
-    "fr": "fr",
-    "docx": "docx",
-    "gov": "gov",
-    "pdf": "pdf",
-    "xlsx": "xlsx",
-    "qa": "qa",
     "chinese-qa": "chinese_qa",
-    "chinese_qa": "chinese_qa",
     "chinese_simpleqa": "chinese_qa",
-    "bootstrap": "bootstrap",
     "boostrap": "bootstrap",
-    "cron": "cron",
     "mem": "memory",
-    "memory": "memory",
-    "nl2bash": "nl2bash",
-    "skill": "skill",
-    "sp": "sp",
-    "gui": "gui",
-    "merged": "merged",
-    "oss": "oss",
-    "seed": "seed",
-    "task": "task",
 }
 
 PREFIX_DOMAIN: Dict[str, str] = {
@@ -128,11 +106,14 @@ PREFIX_DOMAIN: Dict[str, str] = {
     "nl2bash": "nl2bash",
     "skill": "skill",
     "sp": "systemprompt",
-    "gui": "gui",
-    "merged": "merged",
-    "oss": "oss",
-    "seed": "seed",
-    "task": "task",
+    "gui": "correctness",
+    "merged": "correctness",
+    "oss": "correctness",
+    "seed": "correctness",
+    "task": "correctness",
+    "bi": "correctness",
+    "entask": "correctness",
+    "krama": "script_evaluation",
 }
 
 GRADER_PLAN_BY_DOMAIN: Dict[str, list[GraderSpec]] = {
@@ -192,26 +173,18 @@ GRADER_PLAN_BY_DOMAIN: Dict[str, list[GraderSpec]] = {
     "systemprompt": [
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
-    "gui": [
+    "correctness": [
         GraderSpec("CorrectnessGrader", "correctness"),
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
-    "merged": [
-        GraderSpec("CorrectnessGrader", "correctness"),
+    "script_evaluation": [
+        GraderSpec("ScriptGrader", "script_evaluation"),
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
-    "oss": [
-        GraderSpec("CorrectnessGrader", "correctness"),
-        GraderSpec("TrajectoryGrader", "trajectory"),
-    ],
-    "seed": [
-        GraderSpec("CorrectnessGrader", "correctness"),
-        GraderSpec("TrajectoryGrader", "trajectory"),
-    ],
-    "task": [
-        GraderSpec("CorrectnessGrader", "correctness"),
-        GraderSpec("TrajectoryGrader", "trajectory"),
-    ],
+}
+
+NORMALIZABLE_EVALUATORS = {
+    "script_evaluation",
 }
 
 
@@ -324,8 +297,8 @@ def select_judge_grader(task_info: TaskInfo) -> list[GraderSpec]:
     return plan
 
 
-def _normalize_score(raw_score: float) -> float:
-    if 0.0 <= raw_score <= 1.0:
+def _normalize_score(raw_score: float, evaluator: str) -> float:
+    if evaluator in NORMALIZABLE_EVALUATORS:
         return raw_score
     if 1.0 <= raw_score <= 5.0:
         return (raw_score - 1.0) / 4.0
@@ -334,7 +307,7 @@ def _normalize_score(raw_score: float) -> float:
     return 1.0
 
 
-def _score_from_result(result: Any) -> tuple[float, str]:
+def _score_from_result(result: Any, evaluator: str) -> tuple[float, str]:
     if hasattr(result, "error"):
         return 0.0, str(getattr(result, "error", "GraderError"))
     raw = getattr(result, "score", result)
@@ -343,7 +316,7 @@ def _score_from_result(result: Any) -> tuple[float, str]:
     except Exception:
         return 0.0, f"invalid score: {raw!r}"
     reason = str(getattr(result, "reason", "") or "")
-    return _normalize_score(raw_float), reason
+    return _normalize_score(raw_float, evaluator), reason
 
 
 def _stringify_answer(input_answer: Any) -> str:
@@ -362,6 +335,8 @@ async def _run_grader_spec(
     input_answer: Any,
 ) -> Any:
     session_dict = dict(session)
+    if spec.evaluator == "script_evaluation":
+        return await evaluate_by_script()
     if spec.evaluator == "correctness":
         return await evaluate_correctness(
             session=session_dict,
@@ -410,9 +385,10 @@ async def _run_grader_plan(
     domain: str,
     has_answer: bool,
     policy: RewardPolicy = DEFAULT_REWARD_POLICY,
-) -> tuple[float, str]:
+) -> tuple[float, str, dict[str, float]]:
     entries: list[GraderScoreEntry] = []
     info_lines: list[str] = []
+    metrics = {}
 
     for spec in plan:
         with trace_span("_run_grader_spec", {"evaluator": spec.evaluator}):
@@ -423,7 +399,7 @@ async def _run_grader_plan(
                 input_answer=input_answer,
             )
         log_grader_score_line(result, label=spec.name)
-        normalized, reason = _score_from_result(result)
+        normalized, reason = _score_from_result(result, evaluator=spec.evaluator)
         high_variance = False
         metadata = getattr(result, "metadata", None)
         if isinstance(metadata, dict):
@@ -433,6 +409,7 @@ async def _run_grader_plan(
         info_lines.append(
             f"{spec.name}[{tag}]={normalized:.4f}" + (f" | {reason}" if reason else "")
         )
+        metrics[spec.evaluator] = normalized
         if spec.include_in_score:
             entries.append(
                 GraderScoreEntry(
@@ -445,7 +422,7 @@ async def _run_grader_plan(
             )
 
     if not entries:
-        return 0.0, "无可计分 grader"
+        return 0.0, "无可计分 grader", {}
 
     raw_score, aggregate_detail = aggregate_grader_scores(
         entries,
@@ -453,9 +430,7 @@ async def _run_grader_plan(
         policy=policy,
     )
     outcome_scores = [
-        entry.normalized
-        for entry in entries
-        if entry.evaluator not in PROCESS_EVALUATORS
+        entry.normalized for entry in entries if entry.evaluator not in PROCESS_EVALUATORS
     ]
     any_high_variance = any(entry.high_variance for entry in entries)
     final_score, penalty_detail = finalize_reward(
@@ -473,7 +448,7 @@ async def _run_grader_plan(
             f"penalties: {penalty_detail}",
         ]
     )
-    return final_score, details
+    return final_score, details, metrics
 
 
 def run_judge(task_yaml_path: Union[str, Path]) -> Any:
@@ -487,14 +462,14 @@ def run_judge(task_yaml_path: Union[str, Path]) -> Any:
 
     query = str(inputs.get("query", ""))
     final_response = inputs.get("final_response", "")
-    score, info = llm_judge(
+    score, info, metrics = llm_judge(
         query=query,
         session=session,
         final_response=final_response,
         task_id=task_info.task_id,
         input_answer=inputs.get("answer"),
     )
-    return {"score": score, "info": info}
+    return {"score": score, "info": info, "metrics": metrics}
 
 
 def llm_judge(
@@ -504,7 +479,7 @@ def llm_judge(
     task_id: str,
     input_answer: Any = None,
     **kwargs: Any,
-) -> tuple[float, str]:
+) -> tuple[float, str, dict[str, float]]:
     del final_response, kwargs
     has_answer = (
         _answer_is_non_empty(input_answer)
@@ -519,7 +494,7 @@ def llm_judge(
     for attempt in range(1, max_retries + 1):
         try:
             with trace_span("_run_grader_plan", {"attempt": attempt}):
-                score, details = asyncio.run(
+                score, details, metrics = asyncio.run(
                     _run_grader_plan(
                         plan=plan,
                         query=str(query),
@@ -557,7 +532,7 @@ def llm_judge(
         f"task_id={task_info.task_id}, prefix={task_info.prefix}, domain={task_info.domain}, "
         f"has_answer={task_info.has_answer}, final_score={score:.4f} | {details}"
     )
-    return score, info
+    return score, info, metrics
 
 
 def main() -> None:

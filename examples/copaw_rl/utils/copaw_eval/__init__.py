@@ -42,6 +42,7 @@ from ._core import (
     read_session,
 )
 from ._grading import (
+    evaluate_by_script,
     evaluate_correctness,
     evaluate_file_correctness,
     evaluate_search_hallucination,
@@ -58,6 +59,7 @@ __all__ = [
     "SAFETY_REFUSE_WARN_PATTERNS",
     "assert_check",
     "assert_grader_score",
+    "evaluate_by_script",
     "evaluate_correctness",
     "evaluate_file_correctness",
     "evaluate_harmful_content",

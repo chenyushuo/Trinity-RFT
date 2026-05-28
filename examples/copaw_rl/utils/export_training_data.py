@@ -95,7 +95,7 @@ def _llm_judge(
     final_response: str,
     task_id: str,
     input_answer,
-) -> tuple[float, str]:
+) -> tuple[float, str, dict[str, float]]:
     """通过 utils/judge.py 分发到对应 grader。"""
     return dispatch_llm_judge(
         query=query,
@@ -169,7 +169,7 @@ def export_training_data(
 ) -> None:
     start_time = time.perf_counter()
     if timed_out:
-        reward, judge_reason = 0.0, "call_agent 超时结束，跳过 LLM judge"
+        reward, judge_reason, metrics = 0.0, "call_agent 超时结束，跳过 LLM judge", {}
     else:
         try:
             query = _extract_first_user_query(trajectories)
@@ -181,7 +181,7 @@ def export_training_data(
             )
 
             with trace_span("llm_judge"):
-                reward, judge_reason = _llm_judge(
+                reward, judge_reason, metrics = _llm_judge(
                     query=query,
                     session_data=judge_session,
                     final_response=final_response,
@@ -190,7 +190,7 @@ def export_training_data(
                 )
         except Exception as judge_exc:
             # 判断出错时保守处理：视为失败
-            reward, judge_reason = 0.0, f"LLM判断异常(失败): {judge_exc}"
+            reward, judge_reason, metrics = 0.0, f"LLM判断异常(失败): {judge_exc}", {}
     end = time.perf_counter()
     llm_judge_duration = end - start_time
     log.info(
@@ -253,5 +253,6 @@ def export_training_data(
         "extract_duration": extract_duration,
         "llm_judge_duration": llm_judge_duration,
     }
+    output["metrics"] = metrics
     with open(os.path.join(_SCRIPT_DIR, "output.pkl"), "wb") as f:
         pickle.dump(output, f)

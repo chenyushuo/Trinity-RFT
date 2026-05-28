@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import statistics
 from typing import Any
 
@@ -618,6 +619,100 @@ async def _evaluate_search_relevance_once(
 # ---------------------------------------------------------------------------
 # Public wrappers
 # ---------------------------------------------------------------------------
+
+
+@safe_grader_eval("script_evaluation")
+async def evaluate_by_script() -> GraderScore | GraderError:  # noqa: C901
+    """通过外部脚本评估（执行脚本并读取 reward 文件）。"""
+    script_path = os.environ.get("EVAL_SCRIPT_PATH", "/root/tests/test.sh")
+    reward_path = os.environ.get("EVAL_REWARD_FILE", "/logs/verifier/reward.txt")
+    timeout_sec = int(os.environ.get("EVAL_SCRIPT_TIMEOUT", "300"))
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash",
+            script_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("创建子进程时发生异常")
+        return GraderError(
+            name="script_evaluation",
+            error=f"启动脚本失败: {type(exc).__name__}: {exc}",
+        )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        logger.info("脚本超时，已终止")
+        return GraderError(
+            name="script_evaluation",
+            error=f"脚本执行超时（>{timeout_sec}s）: {script_path}",
+        )
+
+    stdout_text = stdout.decode("utf-8", errors="replace").strip()
+    stderr_text = stderr.decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0:
+        msg = stderr_text or stdout_text or "无输出"
+        logger.error(f"脚本退出码 {proc.returncode}: {msg[:500]}")
+        return GraderError(
+            name="script_evaluation",
+            error=f"脚本退出码 {proc.returncode}: {msg[:500]}",
+        )
+
+    try:
+        reward_raw = await asyncio.to_thread(
+            lambda: open(reward_path, encoding="utf-8").read().strip()  # noqa: PTH123
+        )
+    except FileNotFoundError:
+        logger.error(f"未找到奖励文件 {reward_path}")
+        return GraderError(
+            name="script_evaluation",
+            error=f"未找到 reward 文件: {reward_path}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"无法读取奖励文件 {reward_path}: {exc}")
+        return GraderError(
+            name="script_evaluation",
+            error=f"读取 reward 文件失败: {type(exc).__name__}: {exc}",
+        )
+
+    logger.info(f"脚本执行成功，reward 文件内容: {reward_raw[:200]}")
+    score: float | None = None
+    try:
+        score = float(reward_raw)
+    except Exception:
+        score = None
+
+    if score is None:
+        try:
+            reward_json = json.loads(reward_raw)
+            if isinstance(reward_json, dict) and "score" in reward_json:
+                score = float(reward_json["score"])
+        except Exception:
+            score = None
+
+    if score is None:
+        # 兼容 reward 文件里带解释文本的情况，取最后一个浮点数。
+        matches = re.findall(r"[-+]?\d+(?:\.\d+)?", reward_raw)
+        if matches:
+            score = float(matches[-1])
+
+    if score is None:
+        logger.error("无法从 reward 文件中获取分数，请检查 reward 文件格式")
+        return GraderError(
+            name="script_evaluation",
+            error=f"无法从 reward 内容解析分数: {reward_raw[:200]}",
+        )
+
+    return GraderScore(
+        name="script_evaluation",
+        score=score,
+        reason=f"script={script_path}, reward_file={reward_path}, parsed_score={score}",
+    )
 
 
 @safe_grader_eval("correctness")

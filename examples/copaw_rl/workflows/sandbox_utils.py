@@ -301,6 +301,18 @@ def _setup_otel_envs(otel_config: dict = {}):
     return envs
 
 
+def _str_to_bool(s):
+    if isinstance(s, str):
+        s = s.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+    if isinstance(s, bool):
+        return s
+    raise ValueError(f"无法转换为布尔值: {s!r}")
+
+
 def run_workflow(
     sandbox: Sandbox,
     task_id,
@@ -316,8 +328,8 @@ def run_workflow(
         f"--provider-base-url {api_server_url} --provider-model-id {model_path} "
         f"--agent-timeout-seconds 1200"
     )
-    envs = {}
-    enable_otel = otel_config.pop("enable", False)
+    envs = {key: value for key, value in os.environ.items() if key.startswith("JUDGE_")}
+    enable_otel = _str_to_bool(otel_config.pop("enable", False))
     if enable_otel:
         logger.info("Restarting qwenpaw app with LOONGSUITE_PYTHON_SITE_BOOTSTRAP=True")
         sandbox.commands.run("pkill -f '[q]wenpaw app' || true", timeout=30)
@@ -581,7 +593,7 @@ if __name__ == "__main__":
     try:
         result = sandbox.commands.run(
             "pip uninstall qwenpaw -y && "
-            "pip install qwenpaw==v1.1.7 && "
+            "pip install qwenpaw==v1.1.9 && "
             "pip install oss2 pytest py-openjudge pytest-asyncio && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/react_agent.patch && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/tools/browser_control.py < /root/patch/browser_control.patch && "
