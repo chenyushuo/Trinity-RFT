@@ -288,23 +288,23 @@ def _extract_input_answer(task_config: dict) -> str:
     evaluation = task_config.get("evaluation") or {}
     inputs = evaluation.get("inputs") or {}
     raw_answer = inputs.get("answer")
-    answer_text = ""
 
+    if raw_answer is None:
+        return ""
     if isinstance(raw_answer, dict):
-        answer_obj = raw_answer
-        answer_text = json.dumps(answer_obj, ensure_ascii=False)  # TODO
-    elif isinstance(raw_answer, str):
+        return json.dumps(raw_answer, ensure_ascii=False)
+    if isinstance(raw_answer, str):
         s = raw_answer.strip()
-        if s:
-            try:
-                parsed = json.loads(s)
-                if isinstance(parsed, dict):
-                    answer_obj = parsed
-                else:
-                    answer_text = s  # JSON 但不是 dict（如数组/数字），按普通文本处理
-            except json.JSONDecodeError:
-                answer_text = s  # 普通字符串
-    return answer_text
+        if not s:
+            return ""
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, (dict, list)):
+                return json.dumps(parsed, ensure_ascii=False)
+        except json.JSONDecodeError:
+            pass
+        return s
+    return str(raw_answer)
 
 
 def _extract_text_from_content(content_blocks: list[dict]) -> str:
