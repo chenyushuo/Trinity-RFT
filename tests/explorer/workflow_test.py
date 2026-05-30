@@ -59,6 +59,8 @@ class MockResponse:
     tokens: Optional[Tensor] = Tensor([0, 0])
     prompt_length: int = 1
     eid: EID = field(default_factory=EID)
+    truncate_status: str = "not_truncated"
+    action_mask: Optional[Tensor] = None
 
 
 class DummyWorkflow(Workflow):

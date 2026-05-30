@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from logging import Logger
 from typing import Callable, Coroutine, Dict, List, Optional
 
@@ -98,17 +99,40 @@ def _create_cleanup(
 
         if subprocess_watchdog is not None:
             subprocess_watchdog.stop()
-            for process in getattr(subprocess_watchdog, "_processes", []):
-                if process is None or process.pid is None:
-                    continue
+            processes = getattr(subprocess_watchdog, "_processes", [])
+
+            # Send SIGTERM to all alive processes simultaneously
+            alive_processes = [
+                p for p in processes if p is not None and p.pid is not None and p.is_alive()
+            ]
+
+            for process in alive_processes:
                 try:
-                    kill_process_tree(process.pid, wait_timeout=60)
+                    process.terminate()
                 except Exception as exc:
-                    logger.warning(
-                        "Failed to terminate SGLang child process %s: %s",
-                        process.pid,
-                        exc,
-                    )
+                    logger.warning("Failed to send SIGTERM: %s", exc)
+
+            if alive_processes:
+                # Wait for graceful exit
+                graceful_timeout = 5
+                start_time = time.time()
+                while time.time() - start_time < graceful_timeout:
+                    if not any(p.is_alive() for p in alive_processes):
+                        logger.info("All SGLang subprocesses exited gracefully.")
+                        break
+                    await asyncio.sleep(0.2)
+
+                # Force kill remaining processes
+                still_alive = [p for p in alive_processes if p.is_alive()]
+                for process in still_alive:
+                    try:
+                        kill_process_tree(process.pid, wait_timeout=60)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to terminate SGLang child process %s: %s",
+                            process.pid,
+                            exc,
+                        )
         elif server_args.node_rank > 0:
             kill_process_tree(os.getpid(), include_parent=False, wait_timeout=60)
 

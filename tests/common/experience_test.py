@@ -449,7 +449,8 @@ class TestExperienceConversion(unittest.TestCase):
         )
 
         model = ExperienceModel.from_experience(experience)
-        new_experience = model.to_experience()
+        blob_bytes = experience.serialize()
+        new_experience = model.to_experience(blob_bytes)
         self.assertTrue(torch.equal(new_experience.tokens, tokens))
         self.assertEqual(new_experience.prompt_length, prompt_length)
         self.assertEqual(new_experience.reward, reward)
