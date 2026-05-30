@@ -75,7 +75,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
         extract_duration = output["extract_duration"]
         llm_judge_duration = output["llm_judge_duration"]
         inner_metrics = output["metrics"]
-        for data in dataset:
+        for step, data in enumerate(dataset):
             prompt_token_ids = torch.tensor(data["prompt_token_ids"])
             response_token_ids = torch.tensor(data["token_ids"])
             token_ids = torch.cat([prompt_token_ids, response_token_ids])
@@ -108,6 +108,7 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
                 metrics=metrics,
                 multi_modal_inputs=multi_modal_inputs,
             )
+            exp.eid.step = step
             exps.append(exp)
         del render
 

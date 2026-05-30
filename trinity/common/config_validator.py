@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Tuple
 
 import ray
-from omegaconf import OmegaConf
 
 from trinity.common.config import (
     Config,
@@ -16,6 +15,7 @@ from trinity.common.config import (
     set_if_none,
 )
 from trinity.common.constants import StorageType, SyncMethod, SyncStyle
+from trinity.common.dataclass_utils import build_dataclass_from_mapping
 from trinity.common.patch import kimi_vl_monkey_patch_decorator
 from trinity.utils.log import get_logger
 from trinity.utils.lora_utils import create_dummy_lora
@@ -1243,11 +1243,9 @@ class TrainerConfigValidator(ConfigValidator):
             if config.trainer.trainer_config:
                 from trinity.trainer.verl.verl_config import veRLConfig
 
-                trainer_config_schema = OmegaConf.structured(veRLConfig)
-                trainer_config = OmegaConf.merge(
-                    trainer_config_schema, config.trainer.trainer_config
+                config.trainer.trainer_config = build_dataclass_from_mapping(
+                    veRLConfig, config.trainer.trainer_config
                 )
-                config.trainer.trainer_config = OmegaConf.to_object(trainer_config)
             elif config.trainer.trainer_config_path:
                 raise ValueError(
                     "`trainer_config_path` is deprecated; please use `trainer_config` instead."

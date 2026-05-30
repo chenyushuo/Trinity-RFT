@@ -795,7 +795,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             load_megatron_model_to_gpu(self.actor_module)
         for name, weight in self._get_tensor_generator():
             if torch.distributed.get_rank() == 0:
-                torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+                torch.distributed.broadcast(weight.contiguous(), 0, group=self._model_update_group)
             del weight
         if torch.distributed.get_rank() == 0:
             torch.cuda.synchronize()

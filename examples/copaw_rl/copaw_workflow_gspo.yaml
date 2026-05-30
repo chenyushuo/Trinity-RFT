@@ -12,6 +12,7 @@ algorithm:
     epsilon_high: 8e-4
     clip_mode: "gspo-one-side"
     weight: "gspo_importance_sampling"
+  advantage_fn: step_wise_grpo
   optimizer:
     lr: ${oc.env:LR,1e-6}
     lr_scheduler_type: ${oc.env:LR_SCHEDULER_TYPE,cosine}
