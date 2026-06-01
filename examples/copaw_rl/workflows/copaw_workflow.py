@@ -1,6 +1,8 @@
+import json
 import time
 from typing import List, Optional
 
+import oss2
 import torch
 
 from trinity.common.experience import Experience
@@ -24,6 +26,29 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
             model=model,
             auxiliary_models=auxiliary_models,
         )
+        self.sandbox_token, self.sandbox_template = self.get_sandbox_token_and_template()
+
+    def get_sandbox_token_and_template(self):
+        try:
+            oss_config = self.task.workflow_args["oss"]
+            auth = oss2.Auth(oss_config["access_key_id"], oss_config["access_key_secret"])
+            bucket = oss2.Bucket(
+                auth,
+                oss_config["endpoint"],
+                oss_config["bucket_name"],
+                region=oss_config.get("region"),
+            )
+            content = bucket.get_object("env/sandbox_meta.json").read().decode("utf-8")
+            meta = json.loads(content)
+
+            token = meta.get("E2B_API_KEY")
+            template = meta.get("E2B_TEMPLATE")
+            return token, template
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to read env/sandbox_meta.json from OSS, fallback to None: {e}"
+            )
+            return None, None
 
     def run(self):
         from examples.copaw_rl.workflows.sandbox_utils import (
@@ -32,10 +57,13 @@ class CoPawRLWorkflow(MultiTurnWorkflow):
         )
 
         start_time = time.perf_counter()
+
         sandbox_id = self.task.workflow_args.get("sandbox_id", None)
-        token = self.task.workflow_args["token"]
+        token = self.task.workflow_args.get("token", self.sandbox_token) or self.sandbox_token
         domain = self.task.workflow_args["domain"]
-        template = self.task.workflow_args["template"]
+        template = (
+            self.task.workflow_args.get("template", self.sandbox_template) or self.sandbox_template
+        )
 
         sandbox, created = get_or_create_sandbox(sandbox_id, token, domain, template, self.logger)
         sandbox_id = sandbox.sandbox_id

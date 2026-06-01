@@ -187,19 +187,18 @@ def get_or_create_sandbox(sandbox_id, token, domain, template, logger) -> Tuple[
                     update_sandbox_files(sandbox, template, logger)
                     return sandbox, True
             except Exception as e:
-                logger.error(
+                logger.info(
                     f"    [{attempt}/{max_attempts}] {Colors.WARNING}Failed to check status:{Colors.ENDC} {e}"
                 )
 
             if attempt < max_attempts:
                 time.sleep(2)
 
-        logger.warning(
+        logger.error(
             f"    {Colors.WARNING}Warning: Sandbox did not reach Running state within timeout{Colors.ENDC}"
         )
-        get_sandbox_info(sandbox.sandbox_id, token, domain, logger)
-        update_sandbox_files(sandbox, template, logger)
-        return sandbox, True
+        sandbox.kill()
+        raise RuntimeError("Sandbox did not reach Running state within timeout")
 
 
 def run_with_reconnect(sandbox: Sandbox, cmd, envs, logger, max_retries=5):

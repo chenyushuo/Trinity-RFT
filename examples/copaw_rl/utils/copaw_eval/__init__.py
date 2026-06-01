@@ -48,8 +48,8 @@ from ._grading import (
     evaluate_search_hallucination,
     evaluate_search_relevance,
 )
-from ._pairwise import evaluate_pairwise_correctness
 from ._multimodal import evaluate_screenshot_coherence
+from ._pairwise import evaluate_pairwise_correctness
 from ._trajectory import (
     evaluate_harmful_content,
     evaluate_safety_trajectory,

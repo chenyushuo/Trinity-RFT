@@ -39,7 +39,7 @@ _PAIRWISE_CORRECTNESS_TEMPLATE = PromptTemplate(
                     "说明两份 final response 在“字面上与参考答案的对齐度”上被判为等价。"
                     "你的任务不是重复该判定，而是通过比较**工具调用轨迹的质量**，"
                     "判断哪一份回复的“正确性”更**可信**、更**可验证**（即同样的正确结论，由真实数据得出还是凭空捏造）。"
-                    "仅输出合法 JSON：{{\"score\": <float>, \"reason\": \"...\"}}。"
+                    '仅输出合法 JSON：{{"score": <float>, "reason": "..."}}。'
                     "score 取值仅限三档离散值：**1.0 = A 轨迹明显更可信，0.0 = B 轨迹明显更可信，0.5 = 两侧轨迹质量几乎相等**；"
                     "严禁输出 0.1/0.3/0.7/0.9 等中间值，只能从三档中选一。"
                     "reason 字段要求：必须是已经形成的最终结论，≤200 字；禁止出现 “等等”/“Wait”/“实际上”/“再看看” 等思考草稿、自我修正、计算过程。"
@@ -122,7 +122,7 @@ _PAIRWISE_CORRECTNESS_TEMPLATE = PromptTemplate(
                     "meaning their final responses are deemed equivalent on surface alignment with the reference answer. "
                     "Do NOT repeat that judgment. Instead, compare the **tool-call trajectories** and decide which side's "
                     "correctness is more **trustworthy and verifiable** (same conclusion grounded in real data vs fabricated). "
-                    "Output ONLY valid JSON: {{\"score\": <float>, \"reason\": \"...\"}}. "
+                    'Output ONLY valid JSON: {{"score": <float>, "reason": "..."}}. '
                     "score MUST be one of three discrete values: **1.0 = A trajectory clearly more credible, 0.0 = B trajectory clearly more credible, 0.5 = roughly equal**. "
                     "Strictly forbid intermediate values like 0.1/0.3/0.7/0.9; pick exactly one of the three. "
                     "reason MUST be a finalized judgment, <=200 chars; NO 'wait' / 'actually' / self-correction / scratch reasoning. "
@@ -392,7 +392,7 @@ async def evaluate_pairwise_correctness(
         )
 
     verdict = _score_to_verdict(final_score)
-    metadata: dict[str, Any] = dict(result_ab.metadata or {})
+    metadata: dict[str, Any] = dict(result_ab.metadata or {})  # type: ignore
     metadata.update(
         {
             "verdict": verdict,

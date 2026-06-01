@@ -43,8 +43,8 @@ buffer:
       data_selector:
         selector_type: shuffle
       workflow_args:
-        token: ${oc.env:E2B_API_KEY}
-        template: ${oc.env:E2B_TEMPLATE}
+        token: ${oc.env:E2B_API_KEY,null}
+        template: ${oc.env:E2B_TEMPLATE,null}
         domain: ${oc.env:E2B_DOMAIN,"sandbox01.vpc.cn-hongkong.pai-eas.aliyuncs.com"}
         dashscope_api_key: ${oc.env:DASHSCOPE_API_KEY}
         oss:
