@@ -48,6 +48,7 @@ from ._grading import (
     evaluate_search_hallucination,
     evaluate_search_relevance,
 )
+from ._pairwise import evaluate_pairwise_correctness
 from ._multimodal import evaluate_screenshot_coherence
 from ._trajectory import (
     evaluate_harmful_content,
@@ -67,6 +68,7 @@ __all__ = [
     "evaluate_screenshot_coherence",
     "evaluate_search_hallucination",
     "evaluate_search_relevance",
+    "evaluate_pairwise_correctness",
     "evaluate_trajectory",
     "extract_assistant_thinking",
     "extract_final_response",
