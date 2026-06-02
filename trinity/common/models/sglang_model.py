@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import operator
 import os
 import traceback
+from functools import reduce
 from logging import Logger
 from typing import Any, List, Literal, Optional, Sequence, Tuple
 
@@ -114,6 +116,26 @@ class SGLangClient:
                 f"Failed to destroy weights update group in SGLang API server: {response.get('message')}"
             )
         return success
+
+    async def flush_cache(self, timeout: float = 30) -> bool:
+        """Flush KV and Mamba cache to free GPU memory before weight sync."""
+        import httpx
+
+        url = f"{self.server_url}/flush_cache"
+        try:
+            async with httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {self.api_key}" if self.api_key else ""}
+            ) as client:
+                response = await client.post(url, timeout=timeout)
+                if response.status_code == 200:
+                    return True
+                self.logger.warning(
+                    f"flush_cache returned status {response.status_code}: {response.text}"
+                )
+                return False
+        except Exception as e:
+            self.logger.warning(f"Failed to flush cache: {e}")
+            return False
 
     async def update_weights_from_distributed(
         self,
@@ -533,12 +555,23 @@ class SGLangRolloutModel(BaseInferenceModel):
         self.logger.info(f"Synchronizing model to version {model_version} using method {method}...")
         if method == SyncMethod.NCCL:
             assert self.state_dict_meta, "state_dict_meta must be initialized for NCCL sync"
-            await self.api_client.update_weights_from_distributed(
-                state_dict_meta_list=self.state_dict_meta,
-                group_name=self.group_name,
-                weight_version=str(model_version),
-                timeout=timeout,
+            # Flush KV + Mamba cache to free GPU memory for receive buffers
+            await self.api_client.flush_cache()
+            self.logger.info("Flushed KV/Mamba cache before NCCL weight sync")
+            batches = self._partition_state_dict_meta(self.state_dict_meta)
+            self.logger.info(
+                f"NCCL weight sync: {len(self.state_dict_meta)} tensors in {len(batches)} batches "
+                f"(buffer_size={self.config.weight_sync_buffer_size / 1024**3:.1f} GB)"
             )
+            for i, batch in enumerate(batches):
+                is_last = i == len(batches) - 1
+                await self.api_client.update_weights_from_distributed(
+                    state_dict_meta_list=batch,
+                    group_name=self.group_name,
+                    weight_version=str(model_version),
+                    flush_cache=is_last,
+                    timeout=timeout,
+                )
             self.model_version = model_version
         elif method == SyncMethod.CHECKPOINT:
             model_path = await self.synchronizer.get_latest_model_path.remote(use_huggingface=True)
@@ -553,6 +586,39 @@ class SGLangRolloutModel(BaseInferenceModel):
             raise ValueError(f"Unsupported sync method for SGLang: {method}")
         self.logger.info("Synchronization finished.")
         return model_version
+
+    def _partition_state_dict_meta(
+        self, meta_list: "List[Tuple[str, str, Tuple]]"
+    ) -> "List[List[Tuple[str, str, Tuple]]]":
+        """Partition state_dict_meta into batches that fit within weight_sync_buffer_size.
+
+        This prevents OOM during NCCL weight sync by ensuring SGLang only allocates
+        receive buffers for one batch at a time, rather than all tensors simultaneously.
+        """
+        buffer_size = self.config.weight_sync_buffer_size
+
+        batches: list = []
+        current_batch: list = []
+        current_size = 0
+
+        for item in meta_list:
+            name, dtype_str, shape = item
+            dtype = getattr(torch, dtype_str, torch.bfloat16)
+            elem_size = torch.tensor([], dtype=dtype).element_size()
+            tensor_bytes = reduce(operator.mul, shape, 1) * elem_size
+
+            if current_size + tensor_bytes > buffer_size and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_size = 0
+
+            current_batch.append(item)
+            current_size += tensor_bytes
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     def get_model_version(self) -> int:
         return self.model_version
