@@ -109,7 +109,7 @@ def create_sandbox(token, domain, template, logger) -> Sandbox:
     return sandbox
 
 
-def update_sandbox_files(sandbox: Sandbox, template, logger):
+def update_sandbox_files(sandbox: Sandbox, logger):
     """递归同步 utils/ 下所有 .py 和 .sh 文件到 /root/，保留目录结构。
 
     - 顶层模块（如 bench_client.py）→ /root/bench_client.py
@@ -163,7 +163,7 @@ def get_or_create_sandbox(sandbox_id, token, domain, template, logger) -> Tuple[
         )
         sandbox = connect_sandbox(sandbox_id, token, domain, logger)
         get_sandbox_info(sandbox_id, token, domain, logger)
-        update_sandbox_files(sandbox, template, logger)
+        update_sandbox_files(sandbox, logger)
         return sandbox, False
     else:
         logger.info(
@@ -184,7 +184,7 @@ def get_or_create_sandbox(sandbox_id, token, domain, template, logger) -> Tuple[
                 if is_running:
                     logger.info(f"    {Colors.OKGREEN}✓ Sandbox is now running!{Colors.ENDC}")
                     get_sandbox_info(sandbox.sandbox_id, token, domain, logger)
-                    update_sandbox_files(sandbox, template, logger)
+                    update_sandbox_files(sandbox, logger)
                     return sandbox, True
             except Exception as e:
                 logger.info(
