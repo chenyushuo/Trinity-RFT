@@ -592,14 +592,14 @@ if __name__ == "__main__":
     try:
         result = sandbox.commands.run(
             "pip uninstall qwenpaw -y && "
-            "pip install qwenpaw==v1.1.9 && "
-            "pip install oss2 pytest py-openjudge pytest-asyncio && "
+            "pip install qwenpaw==v1.1.10 && "
+            "pip install openai requests pyyaml python-dateutil oss2 pytest py-openjudge pytest-asyncio && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/react_agent.py < /root/patch/react_agent.patch && "
             "patch /app/venv/lib/python3.11/site-packages/qwenpaw/agents/tools/browser_control.py < /root/patch/browser_control.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_openai_model.py < /root/patch/openai_model.patch && "
             "patch /app/venv/lib/python3.11/site-packages/agentscope/model/_model_response.py < /root/patch/model_response.patch && "
             "apt-get update && "
-            "apt-get install -y xfce4 xfce4-goodies x11vnc openbox xvfb novnc websockify supervisor dbus-x11 && "
+            "apt-get install -y bash ca-certificates curl jq xfce4 xfce4-goodies x11vnc openbox xvfb novnc websockify supervisor dbus-x11 && "
             "rm -rf /var/lib/apt/lists/* && "
             "echo '100.118.58.9    copaw-dataset.oss-cn-beijing-internal.aliyuncs.com' >> /etc/hosts && "
             "bash /root/setup_otel.sh && "
