@@ -4,7 +4,7 @@ from unittest import mock
 import torch
 
 from trinity.common.experience import EID, Experience
-from trinity.trainer.verl.utils import to_data_proto
+from trinity.trainer.verl_legacy.utils import to_data_proto
 
 
 class TestToDataProtoRoutedExperts(unittest.TestCase):

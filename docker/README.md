@@ -34,9 +34,12 @@ Required settings in `docker/env`:
 - `TRINITY_MOUNT_DIR`: Host directory mounted to `/mnt` inside the containers.
 - `TRINITY_NODE1_GPU_0`, `TRINITY_NODE1_GPU_1`: GPU indices for `trinity-node-1`.
 - `TRINITY_NODE2_GPU_0`, `TRINITY_NODE2_GPU_1`: GPU indices for `trinity-node-2`.
-- `TRINITY_HF_ENDPOINT`: Hugging Face mirror or endpoint.
-- `TRINITY_PYPI_INDEX_URL`: Python package index used inside containers.
 - `TRINITY_RAY_DASHBOARD_PORT`: Host port mapped to the Ray dashboard.
+
+Optional settings in `docker/env`:
+
+- `TRINITY_HF_ENDPOINT`: Hugging Face mirror or endpoint. Leave it empty to use the container default.
+- `TRINITY_PYPI_INDEX_URL`: Python package index used inside containers. Leave it empty to use the container default.
 
 ## Start And Check The Environment
 
@@ -89,9 +92,51 @@ Stop the Docker test environment after use:
 bash docker/stop.sh
 ```
 
+## Remote Testing
+
+When working from a machine that cannot run the Docker environment (e.g. macOS without GPU), use `sync.sh` and `remote_run.sh` to sync code and run tests on a remote GPU server.
+
+### Prepare the GPU Server
+
+SSH into the remote GPU server and follow the [Test Environment Setup](#test-environment-setup) section above to set up `docker/env`, then start the Docker environment:
+
+```bash
+bash docker/start.sh
+bash docker/status.sh   # verify containers and Ray are healthy
+```
+
+The Docker environment should stay running on the GPU server. You do not need to restart it for each test run.
+
+### Local Setup
+
+1. Copy `docker/remote.env.example` to `docker/remote.env`.
+2. Fill in the remote server details (`TRINITY_REMOTE_HOST`, `TRINITY_REMOTE_WORKSPACE`).
+3. Make sure SSH key authentication is configured for the remote host.
+
+`docker/remote.env` is gitignored and is not synced to the remote
+
+### Sync Code
+
+```bash
+bash docker/sync.sh              # sync local code to remote workspace
+bash docker/sync.sh --dry-run    # preview what would be synced
+```
+
+### Run Tests Remotely
+
+```bash
+bash docker/remote_run.sh --module common
+bash docker/remote_run.sh --module common --keyword test_config
+bash docker/remote_run.sh --module explorer --no-sync --timeout 300
+```
+
+`remote_run.sh` syncs code first (unless `--no-sync` is passed), then runs `docker/run.sh` on the remote machine via SSH.
+
 ## Script Roles
 
-- [start.sh](/nas/pxc/rft/Trinity-RFT/docker/start.sh): starts the test environment.
-- [status.sh](/nas/pxc/rft/Trinity-RFT/docker/status.sh): checks container state and Ray health.
-- [run.sh](/nas/pxc/rft/Trinity-RFT/docker/run.sh): runs pytest in the Docker test environment.
-- [stop.sh](/nas/pxc/rft/Trinity-RFT/docker/stop.sh): shuts the test environment down cleanly.
+- [start.sh](start.sh): starts the test environment.
+- [status.sh](status.sh): checks container state and Ray health.
+- [run.sh](run.sh): runs pytest in the Docker test environment.
+- [stop.sh](stop.sh): shuts the test environment down cleanly.
+- [sync.sh](sync.sh): syncs local code to a remote workspace via rsync.
+- [remote_run.sh](remote_run.sh): syncs code and runs tests on a remote server.

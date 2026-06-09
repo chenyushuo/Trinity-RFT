@@ -48,7 +48,7 @@ from verl.utils.logger import log_with_rank
 from verl.utils.model import get_hf_auto_model_class
 
 from trinity.manager.synchronizer import Synchronizer
-from trinity.trainer.verl.verl_trainer import CheckpointMonitor
+from trinity.trainer.verl_legacy.verl_trainer import CheckpointMonitor
 from trinity.utils.log import get_logger
 
 

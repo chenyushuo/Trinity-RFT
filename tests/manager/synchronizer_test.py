@@ -132,6 +132,7 @@ class BaseTestSynchronizer(unittest.TestCase):
         self.config.synchronizer.sync_style = self.sync_style
         self.config.synchronizer.sync_interval = 2
         self.config.monitor.monitor_type = "tensorboard"
+        self.config.data_processor.experience_pipeline.save_input = False
 
         self.config.trainer.total_steps = len(self.train_step_time_list)
         self.config.trainer.save_interval = 100

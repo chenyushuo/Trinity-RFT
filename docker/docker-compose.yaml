@@ -4,9 +4,9 @@ services:
     pull_policy: never
     command: bash -c "source /opt/venv/bin/activate && uv pip install -e .[dev] && ray start --head --dashboard-host 0.0.0.0 --include-dashboard true --block"
     environment:
-      - HF_ENDPOINT=${TRINITY_HF_ENDPOINT}
+      - HF_ENDPOINT=${TRINITY_HF_ENDPOINT:-}
       - HF_HUB_DISABLE_PROGRESS_BARS=1
-      - UV_DEFAULT_INDEX=${TRINITY_PYPI_INDEX_URL}
+      - UV_DEFAULT_INDEX=${TRINITY_PYPI_INDEX_URL:-}
       - RAY_ADDRESS=auto
       - TRINITY_CHECKPOINT_ROOT_DIR=/mnt/checkpoints
       - TRINITY_TASKSET_PATH=/mnt/data
@@ -45,9 +45,9 @@ services:
     pull_policy: never
     command: bash -c "source /opt/venv/bin/activate && uv pip install -e .[dev] && ray start --address=trinity-node-1:6379 --block"
     environment:
-      - HF_ENDPOINT=${TRINITY_HF_ENDPOINT}
+      - HF_ENDPOINT=${TRINITY_HF_ENDPOINT:-}
       - HF_HUB_DISABLE_PROGRESS_BARS=1
-      - UV_DEFAULT_INDEX=${TRINITY_PYPI_INDEX_URL}
+      - UV_DEFAULT_INDEX=${TRINITY_PYPI_INDEX_URL:-}
       - TRINITY_CHECKPOINT_ROOT_DIR=/mnt/checkpoints
       - TRINITY_TASKSET_PATH=/mnt/data
       - TRINITY_MODEL_PATH=/mnt/Qwen3-0.6B

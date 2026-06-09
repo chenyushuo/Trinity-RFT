@@ -91,12 +91,10 @@ from verl.workers.fsdp_workers import (
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 from trinity.common.config import AlgorithmConfig
-from trinity.common.constants import ROLLOUT_WEIGHT_SYNC_GROUP_NAME, SyncMethod
 from trinity.common.patch import kimi_vl_monkey_patch_decorator
-from trinity.manager.synchronizer import Synchronizer
-from trinity.trainer.verl.fsdp_checkpoint_manager import FSDPCheckpointManager
-from trinity.trainer.verl.monkey_patch import apply_monkey_patch
-from trinity.trainer.verl.utils import apply_fsdp2
+from trinity.trainer.verl_legacy.fsdp_checkpoint_manager import FSDPCheckpointManager
+from trinity.trainer.verl_legacy.monkey_patch import apply_monkey_patch
+from trinity.trainer.verl_legacy.utils import apply_fsdp2
 from trinity.utils.distributed import init_process_group
 from trinity.utils.log import get_logger
 
@@ -117,7 +115,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # bug fix patch for seqlen_balancing in verl
         from verl.utils import seqlen_balancing
 
-        from trinity.trainer.verl.utils import rearrange_micro_batches
+        from trinity.trainer.verl_legacy.utils import rearrange_micro_batches
 
         seqlen_balancing.rearrange_micro_batches = rearrange_micro_batches
         # end bug fix patch
@@ -656,7 +654,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        from trinity.trainer.verl.dp_actor import DataParallelPPOActor
+        from trinity.trainer.verl_legacy.dp_actor import DataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
@@ -795,67 +793,86 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         get_torch_device().empty_cache()
 
+        self._cache_state_dict_meta()
+
+    def _cache_state_dict_meta(self):
+        """Cache state_dict meta at init time for lightweight get_weight_sync_info."""
+        if not self._is_actor:
+            return
+        model = self.actor_module_fsdp
+        self.named_modules = []
+        self.state_dict_meta = []
+        with self._fsdp_offload_context():
+            if self.config.actor.strategy == "fsdp":
+                for name, module in model.named_modules():
+                    if isinstance(module, FSDP):
+                        self.named_modules.append((name, module))
+                for name_prefix, module in self.named_modules:
+                    with FSDP.summon_full_params(module, recurse=False):
+                        for name, param in module.named_parameters():
+                            if isinstance(param, FlatParameter):
+                                continue
+                            realname = (
+                                name_prefix[len(FSDP_PREFIX) :] + "." + name
+                                if name_prefix
+                                else name
+                            )
+                            self.state_dict_meta.append(
+                                (realname, str(param.dtype).split(".")[-1], tuple(param.shape))
+                            )
+                        param = None
+                    get_torch_device().empty_cache()
+            else:  # fsdp2
+                for name, param in model.named_parameters():
+                    self.state_dict_meta.append(
+                        (name, str(param.dtype).split(".")[-1], tuple(param.shape))
+                    )
+        self.logger.info(f"Cached state_dict meta: {len(self.state_dict_meta)} parameters")
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def setup_weight_sync_group(self):
-        if self.config.synchronizer.sync_method == SyncMethod.NCCL:
-            model = self.actor_module_fsdp
-            self.named_modules = []
-            self.state_dict_meta = []
-            with self._fsdp_offload_context():
-                if self.config.actor.strategy == "fsdp":
-                    for name, module in model.named_modules():
-                        if isinstance(module, FSDP):
-                            self.named_modules.append((name, module))
-                    for name_prefix, module in self.named_modules:
-                        with FSDP.summon_full_params(module, recurse=False):
-                            for name, param in module.named_parameters():
-                                if isinstance(param, FlatParameter):
-                                    continue
-                                realname = (
-                                    name_prefix[len(FSDP_PREFIX) :] + "." + name
-                                    if name_prefix
-                                    else name
-                                )
-                                self.state_dict_meta.append(
-                                    (realname, str(param.dtype).split(".")[-1], tuple(param.shape))
-                                )
-                            param = None
-                        get_torch_device().empty_cache()
-                else:  # fsdp2
-                    for name, param in model.named_parameters():
-                        self.state_dict_meta.append(
-                            (name, str(param.dtype).split(".")[-1], tuple(param.shape))
-                        )
+    def get_weight_sync_info(self):
+        """Return (addr, port, state_dict_meta) from rank 0. Other ranks return None."""
+        if torch.distributed.get_rank() == 0:
+            master_address, master_port = self.get_available_master_addr_port()
+            self.logger.info(f"Weight sync info: {master_address}:{master_port}")
+            return master_address, int(master_port), self.state_dict_meta
+        return None
 
-            if torch.distributed.get_rank() == 0:
-                import ray
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def setup_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        timeout: int,
+    ):
+        """Join the NCCL process group for weight sync.
 
-                master_address, master_port = self.get_available_master_addr_port()
-                world_size = self.config.synchronizer.explorer_world_size + 1
-                self.logger.info(
-                    f"Trainer init_process_group {master_address}:{master_port} ({world_size})."
-                )
-                synchronizer = Synchronizer.get_actor(
-                    namespace=self.config.synchronizer.ray_namespace
-                )
-                setup_ref = synchronizer.setup_weight_sync_group.remote(
-                    master_address, master_port, self.state_dict_meta
-                )
-                timeout = self.config.synchronizer.sync_timeout
+        Called concurrently with Explorer's setup_weight_sync_group.
+        """
+        if torch.distributed.get_rank() == 0:
+            self.logger.info(
+                f"Trainer init_process_group {master_address}:{master_port} ({world_size})."
+            )
+            self._model_update_group = init_process_group(
+                host=master_address,
+                port=int(master_port),
+                group_name=group_name,
+                backend="nccl",
+                timeout=timeout,
+                world_size=world_size,
+                rank=0,
+            )
+            self.logger.info("Trainer init_process_group done.")
 
-                self.logger.info("Trainer start init_process_group.")
-                self._model_update_group = init_process_group(
-                    host=master_address,
-                    port=master_port,
-                    group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
-                    backend="nccl",
-                    timeout=timeout,
-                    world_size=world_size,
-                    rank=0,
-                )
-                self.logger.info("Trainer init_process_group done, wait for explorer confirmation.")
-                ray.get(setup_ref)
-                self.logger.info("Trainer explorer setup confirmation received.")
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def teardown_weight_sync_group(self):
+        """Destroy the NCCL process group for weight sync."""
+        if torch.distributed.get_rank() == 0 and self._model_update_group is not None:
+            self.logger.info("Tearing down weight sync group.")
+            torch.distributed.destroy_process_group(self._model_update_group)
+            self._model_update_group = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sync_weight(self):
@@ -1210,7 +1227,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         # bug fix patch for seqlen_balancing in verl
         from verl.utils import seqlen_balancing
 
-        from trinity.trainer.verl.utils import rearrange_micro_batches
+        from trinity.trainer.verl_legacy.utils import rearrange_micro_batches
 
         seqlen_balancing.rearrange_micro_batches = rearrange_micro_batches
         # end bug fix patch

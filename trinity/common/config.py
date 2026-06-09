@@ -16,6 +16,7 @@ from trinity.common.constants import (
     LOG_LEVEL_ENV_VAR,
     LOG_NODE_IP_ENV_VAR,
     PLUGIN_DIRS_ENV_VAR,
+    ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
     TRAINER_NAME,
     PromptType,
     SaveStrategy,
@@ -641,6 +642,11 @@ class AlgorithmConfig:
     loss_agg_mode: Optional[str] = None
     # rollout router replay, only for MoE models
     enable_router_replay: bool = False
+    # bypass old logprobs computation by using rollout logprobs directly
+    bypass_old_logprobs: bool = True
+    # rollout correction config for off-policy correction (IS weights, rejection sampling)
+    # If set, should be a dict with keys like: bypass_mode, rollout_is, rollout_rs, etc.
+    rollout_correction: Optional[dict] = None
 
 
 @dataclass
@@ -716,6 +722,8 @@ class ExplorerConfig:
     # for workflow runner
     # number of workflow runners.
     runner_per_model: int = 8  # number of runners per each rollout model
+    runner_prepare_concurrency: int = 8  # cap concurrent prepares (glibc getenv race)
+    runner_prepare_max_retries: int = 2  # retry prepare on transient crash
     max_timeout: int = 1800  # wait each task for 30 minutes at most
     max_retry_times: int = 2  # retry each task for 2 times if it fails or timeout
     env_vars: dict = field(default_factory=dict)  # environment variables for workflow runner
@@ -786,14 +794,22 @@ class TrainerConfig:
     grad_clip: float = 1.0
     use_dynamic_bsz: bool = True
     use_remove_padding: bool = True
+    balance_batch: bool = True
+    # number of warmup steps for critic model, if > 0, only update critic model for the first `critic_warmup` steps
+    critic_warmup: int = 0
     # if None, automatically set to ceil(2 * model.max_model_len / ulysses_sequence_parallel_size)
     max_token_len_per_gpu: Optional[int] = None
     ulysses_sequence_parallel_size: int = 1  # sp size
     fix_actor_microbatch_loss_scale: bool = False  # EXPERIMENTAL
-    # TODO: extract more train-related params from underlying trainer engine
+
+    # offloading
+    param_offload: bool = False
+    optimizer_offload: bool = False
+    grad_offload: bool = False
+    offload_policy: bool = False  # FSDP2-specific
 
     save_strategy: SaveStrategy = SaveStrategy.UNRESTRICTED
-    max_checkpoints_to_keep: Optional[int] = None
+    max_checkpoints_to_keep: int = 0  # 0 means keep all checkpoints
     # ! DO NOT SET
     trust_remote_code: bool = False
     trainer_config: Any = field(default_factory=dict)
@@ -829,6 +845,8 @@ class SynchronizerConfig:
     sync_offset: int = 0
     # waiting for `sync_timeout` seconds before timeout in `nccl` method
     sync_timeout: int = 3600
+    # NCCL process group name for weight sync
+    group_name: str = ROLLOUT_WEIGHT_SYNC_GROUP_NAME
     # wait for the lastest checkpoint to be ready  # TODO: to be used
     wait_for_checkpoint: bool = False
 

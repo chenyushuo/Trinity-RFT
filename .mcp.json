@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "trinity-remote-test": {
+      "command": "uv",
+      "args": ["run", "--no-project", "--with", "mcp[cli]", "python", "docker/mcp_server.py"]
+    }
+  }
+}

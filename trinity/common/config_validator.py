@@ -21,7 +21,7 @@ from trinity.utils.log import get_logger
 from trinity.utils.lora_utils import create_dummy_lora
 
 if TYPE_CHECKING:
-    from trinity.trainer.verl.verl_config import FSDPConfig
+    from trinity.trainer.verl_legacy.verl_config import FSDPConfig
 
 
 class ConfigValidator(ABC):
@@ -1235,42 +1235,57 @@ class TrainerConfigValidator(ConfigValidator):
         config.trainer.trust_remote_code = config.model.trust_remote_code
 
         if config.trainer.trainer_type == "verl":
-            if config.trainer.ulysses_sequence_parallel_size < 1:
-                self.logger.warning(
-                    "Ulysses sequence parallel size is set to 1 "
-                    f"because {config.trainer.ulysses_sequence_parallel_size} is invalid."
-                )
-                config.trainer.ulysses_sequence_parallel_size = 1
+            from trinity.trainer.trainer import is_verl_legacy
 
-            if config.trainer.trainer_config:
-                from trinity.trainer.verl.verl_config import veRLConfig
+            if is_verl_legacy():
+                if config.trainer.ulysses_sequence_parallel_size < 1:
+                    self.logger.warning(
+                        "Ulysses sequence parallel size is set to 1 "
+                        f"because {config.trainer.ulysses_sequence_parallel_size} is invalid."
+                    )
+                    config.trainer.ulysses_sequence_parallel_size = 1
 
-                config.trainer.trainer_config = build_dataclass_from_mapping(
-                    veRLConfig, config.trainer.trainer_config
-                )
-            elif config.trainer.trainer_config_path:
-                raise ValueError(
-                    "`trainer_config_path` is deprecated; please use `trainer_config` instead."
-                )
-            else:
-                from trinity.trainer.verl.verl_config import veRLConfig
+                if config.trainer.max_token_len_per_gpu is None:
+                    if config.trainer.trainer_strategy.startswith("fsdp"):
+                        parallel_size = config.trainer.ulysses_sequence_parallel_size
+                    else:
+                        parallel_size = config.trainer.trainer_config.actor_rollout_ref.actor.megatron.context_parallel_size
+                    config.trainer.max_token_len_per_gpu = math.ceil(
+                        config.model.max_model_len / parallel_size  # type: ignore [operator]
+                    )
 
-                self.logger.info("`trainer_config` is not provided, using default trainer config.")
-                config.trainer.trainer_config = veRLConfig()
-            if config.trainer.max_token_len_per_gpu is None:
-                if config.trainer.trainer_strategy.startswith("fsdp"):
-                    parallel_size = config.trainer.ulysses_sequence_parallel_size
+                if config.trainer.trainer_config:
+                    from trinity.trainer.verl_legacy.verl_config import veRLConfig
+
+                    config.trainer.trainer_config = build_dataclass_from_mapping(
+                        veRLConfig, config.trainer.trainer_config
+                    )
+                elif config.trainer.trainer_config_path:
+                    raise ValueError(
+                        "`trainer_config_path` is deprecated; please use `trainer_config` instead."
+                    )
                 else:
-                    parallel_size = config.trainer.trainer_config.actor_rollout_ref.actor.megatron.context_parallel_size
-                config.trainer.max_token_len_per_gpu = math.ceil(
-                    config.model.max_model_len / parallel_size  # type: ignore [operator]
-                )
+                    from trinity.trainer.verl_legacy.verl_config import veRLConfig
+
+                    self.logger.info(
+                        "`trainer_config` is not provided, using default trainer config."
+                    )
+                    config.trainer.trainer_config = veRLConfig()
+                config.trainer.trainer_config.synchronize_config(config)
+            else:
+                config.trainer.trainer_config = None
+                if config.trainer.ulysses_sequence_parallel_size < 1:
+                    config.trainer.ulysses_sequence_parallel_size = 1
+
+                if config.trainer.max_token_len_per_gpu is None:
+                    config.trainer.max_token_len_per_gpu = math.ceil(
+                        2 * config.model.max_model_len / config.trainer.ulysses_sequence_parallel_size  # type: ignore [operator]
+                    )
             if config.trainer.save_hf_checkpoint not in {"last", "always", "never"}:
                 raise ValueError(
                     f"Invalid trainer.save_hf_checkpoint: {config.trainer.save_hf_checkpoint}, "
                     "must be one of 'last', 'always', or 'never'."
                 )
-            config.trainer.trainer_config.synchronize_config(config)
         elif config.trainer.trainer_type == "tinker":
             config.trainer.trainer_config = None
         else:
@@ -1475,7 +1490,11 @@ class GPUMemoryValidator(ConfigValidator):
         Raises:
             ValueError: If estimated memory usage exceeds safe limits and suggestions are not bypassed.
         """
-        from trinity.trainer.verl.verl_config import veRLConfig
+        if config.trainer.trainer_config is None:
+            self.logger.info("GPU memory check skipped: trainer_config is not set.")
+            return
+
+        from trinity.trainer.verl_legacy.verl_config import veRLConfig
 
         self.pytorch_env_flag = (
             os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "") == "expandable_segments:True"

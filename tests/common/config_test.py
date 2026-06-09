@@ -162,7 +162,8 @@ class TestConfig(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only supported for"):
             config.check_and_update()
 
-    def test_load_default_config(self):
+    @patch("trinity.trainer.trainer.is_verl_legacy", return_value=True)
+    def test_load_default_config(self, _mock_legacy):
         config = get_template_config()
         config.buffer.batch_size = 8
         config.algorithm.repeat_times = 10
@@ -266,7 +267,8 @@ class TestConfig(unittest.TestCase):
             "simple_workflow",
         )
 
-    def test_max_token_len_per_gpu_set_correctly(self):
+    @patch("trinity.trainer.trainer.is_verl_legacy", return_value=True)
+    def test_max_token_len_per_gpu_set_correctly(self, _mock_legacy):
         config = get_template_config()
         config.model.max_model_len = 8192
         config.trainer.ulysses_sequence_parallel_size = 2
@@ -289,7 +291,8 @@ class TestConfig(unittest.TestCase):
             expected_max_token_len,
         )
 
-    def test_optimizer_config_propagation(self):
+    @patch("trinity.trainer.trainer.is_verl_legacy", return_value=True)
+    def test_optimizer_config_propagation(self, _mock_legacy):
         config = get_template_config()
         config.algorithm.optimizer.lr = 1e-4
         config.algorithm.optimizer.weight_decay = 0.05

@@ -5,10 +5,11 @@ Trainer Class
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import traceback
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import ray
@@ -75,6 +76,32 @@ class Trainer:
         await self.synchronizer.set_trainer_status.remote(RunningStatus.RUNNING)
         self.logger.info("Trainer is ready.")
 
+    async def get_weight_sync_info(self) -> Optional[Tuple[str, int, List]]:
+        """Get rendezvous info for NCCL weight sync group setup.
+
+        Returns (master_address, master_port, state_dict_meta) from the
+        trainer's GPU worker rank 0. Called by Synchronizer before
+        coordinating NCCL group creation.
+        """
+        return await self.engine.get_weight_sync_info()
+
+    async def setup_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        timeout: int,
+    ) -> None:
+        """Join the NCCL weight sync group. Called by Synchronizer."""
+        await self.engine.setup_weight_sync_group(
+            master_address, master_port, world_size, group_name, timeout
+        )
+
+    async def teardown_weight_sync_group(self) -> None:
+        """Destroy the NCCL weight sync group. Called by Synchronizer."""
+        await self.engine.teardown_weight_sync_group()
+
     async def train(self) -> str:
         """Train the model with one-step-ahead data prefetch."""
         prefetched_sample_task = None
@@ -127,12 +154,23 @@ class Trainer:
                 metrics.update(await self.train_step(exps))
 
                 # 4. 保持原有 train 后的 sync/save/log 流程不变
-                if await self.need_sync():
+                need_sync = await self.need_sync()
+                need_save = self.need_save()
+                # For CHECKPOINT sync, save_checkpoint is a superset of
+                # save_state_dict — skip the latter to avoid redundant writes
+                # to the same directory.
+                if need_sync and not (need_save and self.sync_method == SyncMethod.CHECKPOINT):
                     metrics.update(await self.sync_weight())
-                if self.need_save():
+                if need_save:
                     metrics.update(
                         await self.save_checkpoint(save_as_hf=self.save_hf_checkpoint == "always")
                     )
+                    if need_sync:
+                        # Update sync bookkeeping even though sync_weight was
+                        # skipped — save_checkpoint already wrote the weights
+                        # and updated latest_state_dict_iteration.txt.
+                        self.last_sync_step = self.train_step_num
+                        self.last_sync_time = time.time()
                 if self.config.trainer.enable_preview:
                     self._log_experiences(repr_samples)
                 self.monitor.log(metrics, self.train_step_num)
@@ -150,9 +188,20 @@ class Trainer:
                 except Exception:
                     pass
 
-            await self.save_checkpoint(
-                block_until_saved=True, save_as_hf=self.save_hf_checkpoint != "never"
-            )
+        # Save final checkpoint if:
+        # - This step wasn't already saved in the loop, OR
+        # - HF format is requested at the last step ("last") but the loop
+        #   only saved without HF format (loop uses save_as_hf only for "always")
+        already_saved = self.need_save()
+        if not already_saved or self.save_hf_checkpoint == "last":
+                await self.save_checkpoint(
+                    block_until_saved=True, save_as_hf=self.save_hf_checkpoint != "never"
+                )
+        else:
+            # The last step was already saved (non-blocking) in the loop.
+            # Wait for background save threads to finish so the iteration
+            # file is guaranteed to exist before the trainer exits.
+            await self.engine.wait_for_save()
             await self.synchronizer.set_trainer_status.remote(RunningStatus.STOPPED)
             self.logger.info("--------------------\n> Trainer finished.\n--------------------")
 
@@ -217,7 +266,7 @@ class Trainer:
                 if result is None:
                     self.logger.error("Trainer sync_weights failed.")
                 else:
-                    self.engine.sync_weight()
+                    self.engine.sync_weight_nccl()
             elif self.sync_method == SyncMethod.CHECKPOINT:
                 await self.engine.save_state_dict()
             elif self.sync_method == SyncMethod.MEMORY:
@@ -299,27 +348,90 @@ class TrainEngineWrapper(ABC):
     async def save_checkpoint(
         self, block_until_saved: bool = False, save_as_hf: bool = False
     ) -> None:
-        """Save the checkpoint."""
+        """Save the whole checkpoint (Including model, optimizer, and other states)."""
+
+    async def wait_for_save(self) -> None:
+        """Wait for any pending background save operations to complete.
+
+        Default implementation is a no-op. Override in subclasses that use
+        background save threads to ensure the checkpoint iteration file is
+        written before the trainer exits.
+        """
+        pass
 
     @abstractmethod
-    def sync_weight(self) -> None:
-        """Sync the model weight."""
+    def sync_weight_nccl(self) -> None:
+        """Sync the model weight by NCCL. (For `NCCL` sync method)"""
 
     @abstractmethod
     async def upload_state_dict(self) -> None:
-        """Upload the state dict to Synchronizer."""
+        """Upload the state dict to Synchronizer. (For `MEMORY` sync method)"""
 
     @abstractmethod
     async def save_state_dict(self) -> None:
-        """Only save the model state dict for Synchronizer."""
+        """Only save the model state dict for Synchronizer.  (For `CHECKPOINT` sync method)"""
+
+    @abstractmethod
+    async def get_weight_sync_info(self) -> Optional[Tuple[str, int, List]]:
+        """Get (master_address, master_port, state_dict_meta) for NCCL group setup."""
+
+    @abstractmethod
+    async def setup_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        timeout: int,
+    ) -> None:
+        """Join the NCCL weight sync group."""
+
+    @abstractmethod
+    async def teardown_weight_sync_group(self) -> None:
+        """Tear down the NCCL weight sync group."""
+
+
+def is_verl_legacy() -> bool:
+    """Return True when the installed verl package is < 0.8 (legacy backend)."""
+    from packaging.version import parse as parse_version
+
+    try:
+        import verl
+
+        ver = getattr(verl, "__version__", "0.0.0")
+    except ImportError:
+        return False
+    return parse_version(ver) < parse_version("0.8.0")
+
+
+def get_latest_hf_checkpoint_path(config: Config) -> str | None:
+    """Return the latest HF checkpoint path for a verl trainer config."""
+    if config.trainer.trainer_type != "verl":
+        raise ValueError("This function is only for verl trainer.")
+
+    from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+
+    checkpoint_dir = find_latest_ckpt_path(config.checkpoint_job_dir)
+    if checkpoint_dir is None:
+        return None
+
+    hf_checkpoint_dir = os.path.join(checkpoint_dir, "actor", "huggingface")
+    if not os.path.exists(hf_checkpoint_dir):
+        return None
+    return hf_checkpoint_dir
 
 
 def get_trainer_wrapper(config: Config) -> TrainEngineWrapper:
     """Get a trainer wrapper."""
     if config.trainer.trainer_type == "verl":
-        from trinity.trainer.verl.verl_trainer import VerlPPOTrainerWrapper
+        if is_verl_legacy():
+            from trinity.trainer.verl_legacy.verl_trainer import VerlPPOTrainerWrapper
 
-        return VerlPPOTrainerWrapper(config)
+            return VerlPPOTrainerWrapper(config)
+        else:
+            from trinity.trainer.verl.trainer import VERLTrainer
+
+            return VERLTrainer(config)
     elif config.trainer.trainer_type == "tinker":
         from trinity.trainer.tinker.tinker_trainer import TinkerTrainerWrapper
 

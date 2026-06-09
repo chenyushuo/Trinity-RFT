@@ -351,9 +351,20 @@ class TinkerTrainerWrapper(TrainEngineWrapper):
         with open(self.local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.train_step_num))
 
-    def sync_weight(self) -> None:
+    def sync_weight_nccl(self) -> None:
         """Sync the model weight."""
         raise NotImplementedError("Tinker trainer does not support NCCL sync")
+
+    async def get_weight_sync_info(self):
+        return None, None, []
+
+    async def setup_weight_sync_group(
+        self, master_address, master_port, world_size, group_name, timeout
+    ):
+        pass
+
+    async def teardown_weight_sync_group(self):
+        pass
 
     async def upload_state_dict(self) -> None:
         """Upload the state dict to Synchronizer."""

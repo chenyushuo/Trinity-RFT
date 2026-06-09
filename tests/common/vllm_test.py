@@ -1497,7 +1497,7 @@ class TestSuperLongGeneration(VLLMTestBase):
 
     async def test_generate(self):
         base_dir = os.path.dirname(__file__)
-        target_dir = os.path.join(base_dir, "..", "..", "trinity", "trainer", "verl")
+        target_dir = os.path.join(base_dir, "..", "..", "trinity", "trainer", "verl_legacy")
         with open(os.path.join(target_dir, "fsdp_workers.py")) as f:
             fsdp_code = f.read()
         with open(os.path.join(target_dir, "megatron_workers.py")) as f:

@@ -209,10 +209,10 @@ class TestDataJuicerExperiencePipeline(unittest.IsolatedAsyncioTestCase):
         metrics = await pipeline.process.remote(Experience.serialize_many(exps))
         self.assertIsInstance(metrics, dict)
         reader = get_buffer_reader(config.buffer.trainer_input.experience_buffer)
-        filtered_exps = reader.read(batch_size=2)
+        filtered_exps = await reader.read(batch_size=2)
         self.assertEqual(len(filtered_exps), 2)
         with self.assertRaises(TimeoutError):
-            reader.read(batch_size=1)
+            await reader.read(batch_size=1)
         await pipeline.close.remote()
 
 

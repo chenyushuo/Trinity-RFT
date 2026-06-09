@@ -40,7 +40,7 @@ from verl.utils.megatron_utils import (
 )
 
 from trinity.manager.synchronizer import Synchronizer
-from trinity.trainer.verl.verl_trainer import CheckpointMonitor
+from trinity.trainer.verl_legacy.verl_trainer import CheckpointMonitor
 from trinity.utils.log import get_logger
 
 

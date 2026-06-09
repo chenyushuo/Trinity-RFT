@@ -85,11 +85,12 @@ from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.megatron_workers import logger, set_random_seed
 
 from trinity.common.config import AlgorithmConfig
-from trinity.common.constants import ROLLOUT_WEIGHT_SYNC_GROUP_NAME, SyncMethod
 from trinity.manager.synchronizer import Synchronizer
-from trinity.trainer.verl.megatron_actor import MegatronPPOActor
-from trinity.trainer.verl.megatron_checkpoint_manager import MegatronCheckpointManager
-from trinity.trainer.verl.utils import patch_rope_theta_in_hf_config
+from trinity.trainer.verl_legacy.megatron_actor import MegatronPPOActor
+from trinity.trainer.verl_legacy.megatron_checkpoint_manager import (
+    MegatronCheckpointManager,
+)
+from trinity.trainer.verl_legacy.utils import patch_rope_theta_in_hf_config
 from trinity.utils.distributed import init_process_group
 from trinity.utils.log import get_logger
 
@@ -717,6 +718,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         get_torch_device().empty_cache()
         log_gpu_memory_usage("After init_model finish", logger=self.logger)
 
+        self._cache_state_dict_meta()
+
     def _get_tensor_generator(self):
         """
         This part of the code is written by referring to the initialization of the `MegatronVLLMShardingManager` class
@@ -742,49 +745,68 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             )
         return per_tensor_param
 
+    def _cache_state_dict_meta(self):
+        """Cache state_dict meta at init time for lightweight get_weight_sync_info."""
+        if not self._is_actor:
+            return
+        aggressive_empty_cache(force_sync=True)
+        set_expandable_segments(False)
+        self.state_dict_meta = []
+
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module)
+        for name, weight in self._get_tensor_generator():
+            self.state_dict_meta.append(
+                (name, str(weight.dtype).split(".")[-1], tuple(weight.shape))
+            )
+            del weight
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+        torch.distributed.barrier()
+        torch.cuda.empty_cache()
+        self.logger.info(f"Cached state_dict meta: {len(self.state_dict_meta)} parameters")
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def setup_weight_sync_group(self):
-        if self.config.synchronizer.sync_method == SyncMethod.NCCL:
-            aggressive_empty_cache(force_sync=True)
-            set_expandable_segments(False)
-            self.state_dict_meta = []
+    def get_weight_sync_info(self):
+        """Return (addr, port, state_dict_meta) from rank 0. Other ranks return None."""
+        if torch.distributed.get_rank() == 0:
+            master_address, master_port = self.get_available_master_addr_port()
+            self.logger.info(f"Weight sync info: {master_address}:{master_port}")
+            return master_address, int(master_port), self.state_dict_meta
+        return None
 
-            if self._is_offload_param:
-                load_megatron_model_to_gpu(self.actor_module)
-            for name, weight in self._get_tensor_generator():
-                self.state_dict_meta.append(
-                    (name, str(weight.dtype).split(".")[-1], tuple(weight.shape))
-                )
-                del weight
-            if self._is_offload_param:
-                offload_megatron_model_to_cpu(self.actor_module)
-            torch.distributed.barrier()
-            torch.cuda.empty_cache()
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def setup_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        timeout: int,
+    ):
+        """Join the NCCL process group for weight sync."""
+        if torch.distributed.get_rank() == 0:
+            self.logger.info(
+                f"Trainer init_process_group {master_address}:{master_port} ({world_size})."
+            )
+            self._model_update_group = init_process_group(
+                host=master_address,
+                port=int(master_port),
+                group_name=group_name,
+                backend="nccl",
+                timeout=timeout,
+                world_size=world_size,
+                rank=0,
+            )
+            self.logger.info("Trainer init_process_group done.")
 
-            if torch.distributed.get_rank() == 0:
-                master_address, master_port = self.get_available_master_addr_port()
-                world_size = self.config.synchronizer.explorer_world_size + 1
-                self.logger.info(
-                    f"Trainer init_process_group {master_address}:{master_port} ({world_size})."
-                )
-                synchronizer = Synchronizer.get_actor(
-                    namespace=self.config.synchronizer.ray_namespace
-                )
-                setup_ref = synchronizer.setup_weight_sync_group.remote(
-                    master_address, master_port, self.state_dict_meta
-                )
-                timeout = self.config.synchronizer.sync_timeout
-
-                self._model_update_group = init_process_group(
-                    host=master_address,
-                    port=master_port,
-                    group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
-                    backend="nccl",
-                    timeout=timeout,
-                    world_size=world_size,
-                    rank=0,
-                )
-                ray.get(setup_ref)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def teardown_weight_sync_group(self):
+        """Destroy the NCCL process group for weight sync."""
+        if torch.distributed.get_rank() == 0 and self._model_update_group is not None:
+            self.logger.info("Tearing down weight sync group.")
+            torch.distributed.destroy_process_group(self._model_update_group)
+            self._model_update_group = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sync_weight(self):

@@ -40,7 +40,7 @@ from trinity.common.config import Config
 from trinity.common.constants import SaveStrategy
 from trinity.common.experience import Experience
 from trinity.trainer.trainer import TrainEngineWrapper
-from trinity.trainer.verl.utils import compute_data_metrics, to_data_proto
+from trinity.trainer.verl_legacy.utils import compute_data_metrics, to_data_proto
 from trinity.utils.log import get_logger
 
 
@@ -219,13 +219,13 @@ class VerlPPOTrainerWrapper(RayPPOTrainer, TrainEngineWrapper):
 
         # define worker classes
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-            from trinity.trainer.verl.fsdp_workers import (
+            from trinity.trainer.verl_legacy.fsdp_workers import (
                 ActorRolloutRefWorker,
                 CriticWorker,
             )
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
-            from trinity.trainer.verl.megatron_workers import (
+            from trinity.trainer.verl_legacy.megatron_workers import (
                 ActorRolloutRefWorker,
                 CriticWorker,
             )
@@ -430,7 +430,6 @@ class VerlPPOTrainerWrapper(RayPPOTrainer, TrainEngineWrapper):
         return self.global_steps
 
     async def prepare(self):
-        self.actor_rollout_wg.setup_weight_sync_group()
         self.actor_rollout_wg.set_algorithm(self.algorithm_config)
 
         # The global step counter, initialized to 0
@@ -440,6 +439,32 @@ class VerlPPOTrainerWrapper(RayPPOTrainer, TrainEngineWrapper):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+
+    async def get_weight_sync_info(self):
+        results = self.actor_rollout_wg.get_weight_sync_info()
+        for r in results:
+            if r is not None:
+                return r
+        raise RuntimeError("Failed to get weight sync info from rank 0")
+
+    async def setup_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        timeout: int,
+    ):
+        self.actor_rollout_wg.setup_weight_sync_group(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=world_size,
+            group_name=group_name,
+            timeout=timeout,
+        )
+
+    async def teardown_weight_sync_group(self):
+        self.actor_rollout_wg.teardown_weight_sync_group()
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
         # Do not use verl's dataloader
@@ -557,7 +582,7 @@ class VerlPPOTrainerWrapper(RayPPOTrainer, TrainEngineWrapper):
                 with marked_timer("adv", timing_raw):
                     # compute kl penalty
                     batch, kl_metrics = self.kl_fn.apply_kl_penalty_to_reward(batch)
-                    metrics.update(prefix_metrics(kl_metrics, prefix="critic"))
+                    metrics.update(prefix_metrics(kl_metrics, prefix="advantage"))
                     # compute advantages, executed on the driver process
                     batch, _ = self.advantage_fn(batch)
             else:
@@ -622,9 +647,12 @@ class VerlPPOTrainerWrapper(RayPPOTrainer, TrainEngineWrapper):
     ) -> None:
         await self._save_checkpoint(save_as_hf=save_as_hf)
         if block_until_saved:
-            self.actor_rollout_wg.wait_on_save_thread()
-            if self.algorithm and self.algorithm.use_critic:
-                self.critic_wg.wait_on_save_thread()
+            await self.wait_for_save()
+
+    async def wait_for_save(self) -> None:
+        self.actor_rollout_wg.wait_on_save_thread()
+        if self.algorithm and self.algorithm.use_critic:
+            self.critic_wg.wait_on_save_thread()
 
     async def _save_checkpoint(self, save_as_hf: bool = False):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -726,5 +754,5 @@ class VerlPPOTrainerWrapper(RayPPOTrainer, TrainEngineWrapper):
                 critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
             )
 
-    def sync_weight(self) -> None:
+    def sync_weight_nccl(self) -> None:
         self.actor_rollout_wg.sync_weight()

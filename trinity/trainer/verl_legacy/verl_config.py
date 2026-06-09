@@ -641,6 +641,12 @@ class veRLConfig:
                 )
                 self.critic.strategy = "fsdp"
 
+        # Offloading — propagate from Trinity config to fsdp_config
+        for component in [actor_config, ref_config]:
+            component.fsdp_config.param_offload = config.trainer.param_offload
+            component.fsdp_config.optimizer_offload = config.trainer.optimizer_offload
+            component.fsdp_config.offload_policy = config.trainer.offload_policy
+
         # Algorithm related config
         optim_config = config.algorithm.optimizer
         for field_name in optim_config.__dataclass_fields__:

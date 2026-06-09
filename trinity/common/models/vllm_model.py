@@ -570,7 +570,6 @@ class vLLMRolloutModel(BaseInferenceModel):
         explorer_name: str,
         backend: str = "nccl",
         timeout: int = 1200,
-        state_dict_meta: Optional[List] = None,
     ):
         if self.config.node_rank != 0:
             self.logger.warning(
@@ -588,10 +587,16 @@ class vLLMRolloutModel(BaseInferenceModel):
                 group_name,
                 backend,
                 timeout,
-                state_dict_meta,
                 explorer_name,
                 self.ray_namespace,
             ),
+        )
+
+    async def set_state_dict_meta(self, state_dict_meta: List):
+        """Set the state_dict meta for NCCL weight sync."""
+        return await self._collective_rpc(
+            "set_state_dict_meta",
+            args=(state_dict_meta,),
         )
 
     async def run_api_server(self) -> bool:

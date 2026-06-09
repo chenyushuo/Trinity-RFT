@@ -10,7 +10,9 @@ def main(args):
     subprocess.run(["git", "checkout", args.version], cwd=args.repo_dir, check=True)
 
     # copy files from verl repo to trinity repo with new names, and add them to git
-    trinity_path_prefix = Path(__file__).parent.parent.parent / "trinity" / "trainer" / "verl"
+    trinity_path_prefix = (
+        Path(__file__).parent.parent.parent / "trinity" / "trainer" / "verl_legacy"
+    )
     verl_path_prefix = Path(args.repo_dir)
     file_maps = {
         "fsdp_workers": ("verl", "workers", "fsdp_workers.py"),

@@ -240,6 +240,18 @@ def get_latest_state_dict(
     return None, 0  # type: ignore
 
 
+def has_huggingface_model_weights(checkpoint_path: str) -> bool:
+    """Return True when ``checkpoint_path`` contains serialized HF model weights."""
+    weight_file_prefixes = (
+        "model.safetensors",
+        "pytorch_model",
+        "adapter_model",
+    )
+    if not os.path.isdir(checkpoint_path):
+        return False
+    return any(name.startswith(weight_file_prefixes) for name in os.listdir(checkpoint_path))
+
+
 def load_state_dict(checkpoint_dir: str, config: TrainerConfig) -> Union[dict, Tuple[str, str]]:
     """Load state dict from a checkpoint dir.
 
@@ -252,10 +264,21 @@ def load_state_dict(checkpoint_dir: str, config: TrainerConfig) -> Union[dict, T
             megatron dist checkpointing, return a tuple of (method, checkpoint_dir).
     """
     if config.trainer_type == "verl":
+        from trinity.trainer.trainer import is_verl_legacy
+
         strategy = config.trainer_strategy
         if strategy in {"fsdp", "fsdp2"}:
             return load_fsdp_state_dict_from_verl_checkpoint(checkpoint_dir)
         elif strategy == "megatron":
+            huggingface_dir = os.path.join(checkpoint_dir, "huggingface")
+            if not is_verl_legacy():
+                # In verl >= 0.8 Megatron checkpoints, model weights may live
+                # under ``huggingface/`` while ``dist_ckpt/`` contains only
+                # optimizer and RNG state. Prefer HF weights when present to
+                # avoid loading an optimizer-only dist checkpoint.
+                if has_huggingface_model_weights(huggingface_dir):
+                    return "huggingface", huggingface_dir
+                return "megatron", checkpoint_dir
             actor_config = config.trainer_config.actor_rollout_ref.actor
             if (
                 actor_config.megatron.use_dist_checkpointing
@@ -264,7 +287,7 @@ def load_state_dict(checkpoint_dir: str, config: TrainerConfig) -> Union[dict, T
                 return "megatron", checkpoint_dir
             else:  # hf checkpointing
                 return load_huggingface_state_dict(
-                    os.path.join(checkpoint_dir, "huggingface"),
+                    huggingface_dir,
                     trust_remote_code=config.trust_remote_code,
                 )
         else:
@@ -310,6 +333,30 @@ def get_verl_checkpoint_info(
 
 
 # modified from verl/model_merger/fsdp_model_merger.py
+def _infer_world_size_from_checkpoint(checkpoint_path: str) -> int:
+    """Infer FSDP world_size from shard filenames in *checkpoint_path*.
+
+    The sharded state dicts are named ``model_world_size_{N}_rank_{M}.pt``.
+    We glob for rank-0 files and extract *N*.  This avoids depending on
+    ``fsdp_config.json`` which ``save_state_dict`` (weight-sync shortcut)
+    does not produce.
+    """
+    import glob
+    import re
+
+    pattern = os.path.join(checkpoint_path, "model_world_size_*_rank_0.pt")
+    matches = glob.glob(pattern)
+    if not matches:
+        raise FileNotFoundError(
+            f"No FSDP shard files matching {pattern} found in {checkpoint_path}"
+        )
+    # Extract world_size from the first (and usually only) match.
+    m = re.search(r"model_world_size_(\d+)_rank_0\.pt$", matches[0])
+    if m is None:
+        raise ValueError(f"Cannot parse world_size from filename: {matches[0]}")
+    return int(m.group(1))
+
+
 def load_fsdp_state_dict_from_verl_checkpoint(checkpoint_path: str) -> dict:  # noqa: C901
     """Load state dict from a Verl checkpoint."""
 
@@ -327,7 +374,14 @@ def load_fsdp_state_dict_from_verl_checkpoint(checkpoint_path: str) -> dict:  # 
     )
     merger = FSDPModelMerger(config)
 
-    world_size = merger._get_world_size()
+    # Prefer fsdp_config.json (written by full checkpoints), fall back to
+    # inferring from shard filenames (weight-sync state dicts).
+    try:
+        world_size = merger._get_world_size()
+    except FileNotFoundError:
+        world_size = _infer_world_size_from_checkpoint(checkpoint_path)
+        logger.info(f"Inferred world_size={world_size} from shard filenames")
+
     rank_zero_state_dict = merger._load_rank_zero_state_dict(world_size)
 
     mesh, mesh_dim_names = merger._extract_device_mesh_info(rank_zero_state_dict, world_size)
@@ -365,11 +419,19 @@ def get_megatron_converter(checkpoint_path: str):
     from verl.model_merger.base_model_merger import ModelMergerConfig
     from verl.model_merger.megatron_model_merger import MegatronModelMerger
 
-    from trinity.trainer.verl.utils import patch_rope_theta_in_hf_config
+    from trinity.trainer.verl_legacy.utils import patch_rope_theta_in_hf_config
 
     # modified from verl/model_merger/megatron_model_merger.py
     class MegatronStateDictConverter(MegatronModelMerger):
         def __init__(self, config: ModelMergerConfig):
+            # Patch Megatron-Core ModelType enum compatibility:
+            # newer mcore renamed encoder_and_decoder → encoder_or_decoder,
+            # but verl's get_model() still references the old name.
+            from megatron.core.enums import ModelType
+
+            if not hasattr(ModelType, "encoder_and_decoder"):
+                ModelType.encoder_and_decoder = getattr(ModelType, "encoder_or_decoder", None)
+
             original_init_process_group = torch.distributed.init_process_group
             original_get_rank = torch.distributed.get_rank
             original_get_world_size = torch.distributed.get_world_size

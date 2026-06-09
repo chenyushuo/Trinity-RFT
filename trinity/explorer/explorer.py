@@ -17,12 +17,7 @@ import torch
 from trinity.buffer.buffer import get_buffer_reader
 from trinity.buffer.task_scheduler import get_taskset_scheduler
 from trinity.common.config import Config
-from trinity.common.constants import (
-    ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
-    RunningStatus,
-    SyncMethod,
-    SyncStyle,
-)
+from trinity.common.constants import RunningStatus, SyncMethod, SyncStyle
 from trinity.common.models.allocator import Allocator
 from trinity.common.models.model import ModelWrapper
 from trinity.explorer.rollout_coordinator import RolloutCoordinator
@@ -109,13 +104,24 @@ class Explorer:
         self.logger.info("Rollout models are ready. Continue weight sync initialization.")
 
     async def setup_weight_sync_group(
-        self, master_address: str, master_port: int, state_dict_meta: List = None
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int = None,
+        group_name: str = None,
+        timeout: int = None,
     ):
         await self._wait_for_models_ready()
         base_offset = 1 if self.use_nccl_sync else 0
-        world_size = (
-            len(self.models) * self.config.explorer.rollout_model.tensor_parallel_size + base_offset
-        )
+        if world_size is None:
+            world_size = (
+                len(self.models) * self.config.explorer.rollout_model.tensor_parallel_size
+                + base_offset
+            )
+        if timeout is None:
+            timeout = self.config.synchronizer.sync_timeout
+        if group_name is None:
+            group_name = self.config.synchronizer.group_name
         self.logger.info(
             f"Initialize process group for weight synchronization, "
             f"master_address={master_address}, master_port={master_port}, "
@@ -129,13 +135,26 @@ class Explorer:
                 rank_offset=i * self.config.explorer.rollout_model.tensor_parallel_size
                 + base_offset,
                 world_size=world_size,
-                group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
+                group_name=group_name,
                 explorer_name=self.config.explorer.name,
-                timeout=self.config.synchronizer.sync_timeout,
-                state_dict_meta=state_dict_meta,
+                timeout=timeout,
             )
             for i, model in enumerate(self.models)
         ]
+        await asyncio.gather(*refs)
+
+    async def set_state_dict_meta(self, state_dict_meta: List):
+        """Set the state_dict meta on all model workers for NCCL weight sync.
+
+        Must be called after setup_weight_sync_group and before the first
+        sync_model_weights call.
+        """
+        refs = [model.set_state_dict_meta(state_dict_meta) for model in self.models]
+        await asyncio.gather(*refs)
+
+    async def teardown_weight_sync_group(self):
+        """Destroy the NCCL process group on all model workers."""
+        refs = [model.teardown_process_group() for model in self.models]
         await asyncio.gather(*refs)
 
     async def setup_model_level_weight_sync_group(self):
@@ -156,7 +175,7 @@ class Explorer:
                     master_port=master_port,
                     rank_offset=0,
                     world_size=world_size,
-                    group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
+                    group_name=self.config.synchronizer.group_name,
                     explorer_name=self.config.explorer.name,
                     timeout=self.config.synchronizer.sync_timeout,
                 )
