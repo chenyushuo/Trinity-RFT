@@ -33,6 +33,12 @@ class FusedKernelOptions:
 
 
 @dataclass
+class TiledMlpConfig:
+    enable: bool = False
+    num_shards: int = 4
+
+
+@dataclass
 class ActorModel:
     path: str = ""
     external_lib: Optional[str] = None
@@ -55,6 +61,9 @@ class ActorModel:
 
     # mtp configs
     mtp: MtpConfig = field(default_factory=MtpConfig)
+
+    # tiled_mlp configs
+    tiled_mlp: TiledMlpConfig = field(default_factory=TiledMlpConfig)
 
     # rope configs
     rope_scaling: Optional[dict] = None
@@ -89,18 +98,13 @@ class Optim:
 
 
 @dataclass
-class WrapPolicy:
-    min_num_params: int = 0
-
-
-@dataclass
 class FSDPConfig:
     _target_: str = "verl.workers.config.FSDPEngineConfig"  # DO NOT SET
     param_offload: bool = False
     optimizer_offload: bool = False
     offload_policy: bool = False
     reshard_after_forward: bool = True
-    wrap_policy: WrapPolicy = field(default_factory=WrapPolicy)
+    wrap_policy: dict = field(default_factory=dict)
     fsdp_size: int = -1
     forward_prefetch: bool = False
     model_dtype: Optional[str] = None
@@ -128,7 +132,7 @@ class _McoreEngineConfig(McoreEngineConfig):
     # use_dist_checkpointing: bool = True
     # whether to use the vanilla mbridge without verl-specific optimizations
     # TODO: failed to run with vanilla_mbridge = False, need to investigate further
-    vanilla_mbridge: bool = True
+    vanilla_mbridge: bool = False  # True
 
     max_token_len_per_gpu: Optional[int] = None
     micro_batch_size_per_gpu: Optional[int] = None
@@ -476,7 +480,10 @@ class veRLConfig:
         Ensures: token_len * seq_parallel >= config.model.max_model_len
         """
         current_token_len = getattr(obj, token_len_attr)
-        seq_parallel = getattr(obj, sp_attr)
+        if obj.strategy.startswith("fsdp"):
+            seq_parallel = getattr(obj, sp_attr)
+        else:
+            seq_parallel = obj.megatron.context_parallel_size
         required_min = config.model.max_model_len  # type: ignore
 
         if current_token_len * seq_parallel < required_min:
