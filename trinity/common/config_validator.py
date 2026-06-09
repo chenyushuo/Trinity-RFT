@@ -1258,8 +1258,12 @@ class TrainerConfigValidator(ConfigValidator):
                 self.logger.info("`trainer_config` is not provided, using default trainer config.")
                 config.trainer.trainer_config = veRLConfig()
             if config.trainer.max_token_len_per_gpu is None:
+                if config.trainer.trainer_strategy.startswith("fsdp"):
+                    parallel_size = config.trainer.ulysses_sequence_parallel_size
+                else:
+                    parallel_size = config.trainer.trainer_config.actor_rollout_ref.actor.megatron.context_parallel_size
                 config.trainer.max_token_len_per_gpu = math.ceil(
-                    config.model.max_model_len / config.trainer.ulysses_sequence_parallel_size  # type: ignore [operator]
+                    config.model.max_model_len / parallel_size  # type: ignore [operator]
                 )
             if config.trainer.save_hf_checkpoint not in {"last", "always", "never"}:
                 raise ValueError(
