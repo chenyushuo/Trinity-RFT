@@ -113,9 +113,8 @@ class Explorer:
     ):
         await self._wait_for_models_ready()
         base_offset = 1 if self.use_nccl_sync else 0
-        world_size = (
-            len(self.models) * self.config.explorer.rollout_model.tensor_parallel_size + base_offset
-        )
+        gpu_num_per_model: int = self.config.explorer.rollout_model.gpu_num
+        world_size = len(self.models) * gpu_num_per_model + base_offset
         self.logger.info(
             f"Initialize process group for weight synchronization, "
             f"master_address={master_address}, master_port={master_port}, "
@@ -126,8 +125,7 @@ class Explorer:
             model.init_process_group(
                 master_address=master_address,
                 master_port=master_port,
-                rank_offset=i * self.config.explorer.rollout_model.tensor_parallel_size
-                + base_offset,
+                rank_offset=i * gpu_num_per_model + base_offset,
                 world_size=world_size,
                 group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
                 explorer_name=self.config.explorer.name,
@@ -142,7 +140,7 @@ class Explorer:
         """Setup process group for each model, only used in serve mode."""
         await self._wait_for_models_ready()
         refs = []
-        world_size = self.config.explorer.rollout_model.tensor_parallel_size
+        world_size = self.config.explorer.rollout_model.gpu_num
         for model in self.models:
             master_address, master_port = await model.get_available_address_async(random_port=True)
             self.logger.info(
