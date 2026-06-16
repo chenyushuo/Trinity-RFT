@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -33,6 +34,18 @@ except ImportError:
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r, using default %s", name, raw, default)
+        return default
+
 
 try:
     from copaw_eval import (
@@ -112,7 +125,7 @@ PREFIX_DOMAIN: Dict[str, str] = {
     "seed": "correctness",
     "task": "correctness",
     "bi": "correctness",
-    "entask": "correctness",
+    "entask": "script_evaluation",
     "krama": "script_evaluation",
 }
 
@@ -178,7 +191,8 @@ GRADER_PLAN_BY_DOMAIN: Dict[str, list[GraderSpec]] = {
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
     "script_evaluation": [
-        GraderSpec("ScriptGrader", "script_evaluation"),
+        GraderSpec("ScriptGrader", "script_evaluation", weight=_env_float("JUDGE_SCRIPT_WEIGHT", 1.0)),
+        GraderSpec("CorrectnessGrader", "correctness", weight=_env_float("JUDGE_CORRECTNESS_WEIGHT", 1.0)),
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
 }

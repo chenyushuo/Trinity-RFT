@@ -350,6 +350,15 @@ def run_workflow(
         # 注入 OTEL 相关环境变量
         cmd += " --enable-otel"
         envs.update(_setup_otel_envs(otel_config))
+    # TODO: removed when task is fixed
+    # if task_id.startswith("bi_"):
+    #     data_mcp_json_file = Path(__file__).parent.parent / "utils" / "data_mcp.json"
+    #     with open(data_mcp_json_file, "r") as f:
+    #         sandbox.files.write("/root/data_mcp.json", f)
+    #     sandbox.commands.run("python /root/configure_mcp.py --config /root/data_mcp.json")
+    #     logger.info("MCP configuration applied.")
+    if task_id.lower().startswith("entask_"):
+        envs["EVAL_WORKSPACE"] = "/app/working/workspaces/default"
     launch_duration_seconds, _ = launch_run_py(
         sandbox, cmd, oss_config, dashscope_api_key, logger, envs=envs, raise_error=True
     )

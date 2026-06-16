@@ -361,8 +361,9 @@ class vLLMMultiModalRender(MultiModalRender):
             # and tuples like (video_data, video_meta) for videos.
             if hasattr(item, "media"):
                 return item.media
-            if modality == "video" and isinstance(item, tuple) and len(item) >= 1:
-                return item[0]
+            # TODO: fix video item
+            # if modality == "video" and isinstance(item, tuple) and len(item) >= 1:
+            #     return item[0]
             return item
 
         multi_modal_inputs = {
