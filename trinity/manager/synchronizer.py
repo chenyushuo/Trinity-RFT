@@ -4,7 +4,7 @@ import asyncio
 import os
 import shutil
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 import ray
 
@@ -91,8 +91,6 @@ class Synchronizer:
             )
 
     async def _find_verl_latest_state_dict(self) -> None:
-        from trinity.common.models.utils import load_state_dict
-
         default_local_dir = self.config.checkpoint_job_dir
         local_latest_state_dict_iteration = os.path.join(
             default_local_dir, "latest_state_dict_iteration.txt"
@@ -110,20 +108,7 @@ class Synchronizer:
                     self.logger.info(
                         f"Synchronizer has found a new model state dict at step {latest_model_version}."
                     )
-                    model_state_dict = (
-                        load_state_dict(
-                            os.path.join(
-                                default_local_dir, f"global_step_{latest_model_version}", "actor"
-                            ),
-                            self.config.trainer,
-                        )
-                        if not self.enable_lora
-                        else {}
-                    )
-                    self.logger.info(
-                        f"Synchronizer has loaded model state dict from checkpoint {latest_model_version}."
-                    )
-                    await self.set_model_state_dict(model_state_dict, latest_model_version)
+                    await self.set_model_state_dict(None, latest_model_version)
                     # remove the previous checkpoints to save disk space
                     await self._remove_previous_state_dict(current_model_version)
             await asyncio.sleep(1)
@@ -205,54 +190,8 @@ class Synchronizer:
         """Check if any explorer is require sync."""
         return self.explorer_status_counts[RunningStatus.REQUIRE_SYNC] > 0
 
-    async def set_model_state_dict_with_step_num(
-        self, step_num: Optional[int] = None, world_size: Optional[int] = None
-    ) -> int:
-        """
-        Load and set the model state dictionary from a checkpoint at a specific step.
-
-        Args:
-            step_num: Training step number corresponding to the checkpoint.
-            world_size: Number of shards expected for this checkpoint.
-
-        Returns:
-            The updated model version (step number).
-        """
-        from trinity.common.models.utils import (
-            get_checkpoint_dir_with_step_num,
-            load_state_dict,
-        )
-
-        if world_size is not None:  # Used when trainer updates the model
-            assert step_num is not None
-            assert self.checkpoint_shard_counter[step_num] < world_size, "World size mismatch!"
-            self.checkpoint_shard_counter[step_num] += 1
-            self.logger.info(
-                f"Synchronizer has received {self.checkpoint_shard_counter[step_num]} out of {world_size} shards from the checkpoint {step_num}."
-            )
-            if self.checkpoint_shard_counter[step_num] < world_size:
-                return step_num
-
-        checkpoint_dir, checkpoint_step_num = get_checkpoint_dir_with_step_num(
-            checkpoint_root_path=self.config.checkpoint_job_dir,
-            trainer_type=self.config.trainer.trainer_type,
-            step_num=step_num,
-        )
-        if checkpoint_step_num != self.model_version:
-            model_state_dict = (
-                load_state_dict(
-                    os.path.join(checkpoint_dir, "actor"),
-                    self.config.trainer,
-                )
-                if not self.enable_lora
-                else {}
-            )
-            # lora weights are stored in 'lora_adapter' subfolder and cannot be loaded directly
-            await self.set_model_state_dict(model_state_dict, checkpoint_step_num)
-        return checkpoint_step_num
-
     async def set_model_state_dict(
-        self, model_state_dict: Union[dict, None, str, Tuple[str, str]], trainer_step: int
+        self, model_state_dict: Union[dict, None, str], trainer_step: int
     ):
         """
         Set the new model state and update the version.
@@ -274,6 +213,15 @@ class Synchronizer:
     def get_model_state_dict(self):
         """Return the current model state and its version."""
         return self.model_state_dict, self.model_version
+
+    def get_model_state_dict_iterator(self) -> Iterator[Tuple[str, object]]:
+        """Yield the current in-memory model state for Ray streaming consumers."""
+        if self.model_state_dict is None:
+            return
+        if not isinstance(self.model_state_dict, dict):
+            raise ValueError("Model state dict is not in expected format (dict).")
+        for item in self.model_state_dict.items():
+            yield item
 
     async def get_state_dict_meta(self):
         """
@@ -310,7 +258,51 @@ class Synchronizer:
             state_dict_meta: Metadata of the model parameters.
         """
         explorer = ray.get_actor(self.config.explorer.name, namespace=self.config.ray_namespace)
-        await explorer.setup_weight_sync_group.remote(master_address, master_port, state_dict_meta)
+        await explorer.setup_weight_sync_group.remote(master_address, master_port)
+        if state_dict_meta is not None:
+            await explorer.set_state_dict_meta.remote(state_dict_meta)
+
+    async def coordinate_weight_sync_setup(self, timeout: int = None):
+        """Orchestrate NCCL weight sync group setup between Trainer and Explorer.
+
+        1. Get rendezvous info (addr/port/meta) from Trainer
+        2. Both Trainer and Explorer join the NCCL group concurrently
+        3. Set state_dict_meta on Explorer for weight sync
+        """
+        trainer = ray.get_actor(self.config.trainer.name, namespace=self.config.ray_namespace)
+        explorer = ray.get_actor(self.config.explorer.name, namespace=self.config.ray_namespace)
+
+        addr, port, meta = await trainer.get_weight_sync_info.remote()
+        world_size = self.config.synchronizer.explorer_world_size + 1  # type: ignore
+        timeout = timeout or self.config.synchronizer.sync_timeout
+
+        group_name = self.config.synchronizer.group_name
+        self.logger.info(f"Coordinating weight sync setup: {addr}:{port}, world_size={world_size}")
+        await asyncio.gather(
+            trainer.setup_weight_sync_group.remote(addr, port, world_size, group_name, timeout),
+            explorer.setup_weight_sync_group.remote(addr, port, world_size, group_name, timeout),
+        )
+        await explorer.set_state_dict_meta.remote(meta)
+        self.logger.info("Weight sync group setup complete.")
+
+    async def coordinate_weight_sync_teardown(self):
+        """Orchestrate NCCL weight sync group teardown.
+
+        Explorer tears down first (so no broadcasts are in-flight),
+        then Trainer. Errors from dead actors are caught so that a
+        crashed Explorer/Trainer does not block the remaining teardown.
+        """
+        self.logger.info("Coordinating weight sync teardown.")
+        for role, name in [
+            ("Explorer", self.config.explorer.name),
+            ("Trainer", self.config.trainer.name),
+        ]:
+            try:
+                actor = ray.get_actor(name, namespace=self.config.ray_namespace)
+                await actor.teardown_weight_sync_group.remote()
+            except (ray.exceptions.RayActorError, ValueError) as e:
+                self.logger.warning(f"{role} already dead, skipping teardown: {e}")
+        self.logger.info("Weight sync group teardown complete.")
 
     async def wait_new_model_state_dict(self, current_version: int) -> int:
         """

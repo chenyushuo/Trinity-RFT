@@ -59,15 +59,17 @@ def _assert_routed_experts_shape(test_case, exp, expected_layers: int, expected_
 @parameterized_class(
     (
         "tensor_parallel_size",
+        "data_parallel_size",
+        "pipeline_parallel_size",
         "engine_num",
         "nnodes",
         "enable_history",
         "enable_return_routed_experts",
     ),
     [
-        (4, 1, 2, True, True),
-        (1, 2, 1, False, False),
-        (2, 1, 1, True, True),
+        (2, 1, 1, 2, 1, True, True),
+        (2, 1, 2, 1, 2, False, False),
+        (4, 1, 1, 1, 2, True, True),
     ],
 )
 class TestSGLangOpenAIAPI(RayUnittestBaseAsync):
@@ -87,6 +89,11 @@ class TestSGLangOpenAIAPI(RayUnittestBaseAsync):
         self.config.explorer.rollout_model.engine_type = "sglang"
         self.config.explorer.rollout_model.engine_num = self.engine_num
         self.config.explorer.rollout_model.tensor_parallel_size = self.tensor_parallel_size
+        self.config.explorer.rollout_model.data_parallel_size = self.data_parallel_size
+        self.config.explorer.rollout_model.pipeline_parallel_size = self.pipeline_parallel_size
+        self.config.explorer.rollout_model.enable_expert_parallel = (
+            self.enable_return_routed_experts
+        )
         self.config.explorer.rollout_model.nnodes = self.nnodes
         self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
         self.config.explorer.rollout_model.enable_openai_api = True

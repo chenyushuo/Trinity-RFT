@@ -230,7 +230,9 @@ def both(config: Config) -> StageStatus:
     the latest step. The specific number of experiences may vary for different
     algorithms and tasks.
     """
+    from trinity.common.constants import SyncMethod
     from trinity.explorer.explorer import Explorer
+    from trinity.manager.synchronizer import Synchronizer
     from trinity.trainer.trainer import Trainer
 
     explorer = Explorer.get_actor(config)
@@ -244,6 +246,13 @@ def both(config: Config) -> StageStatus:
                 trainer.prepare.remote(),
             ]
         )
+        # Set up NCCL weight sync group between Trainer and Explorer.
+        # This must happen after both sides are prepared (Trainer has model
+        # meta cached, Explorer has rollout models created) and before the
+        # first weight sync.
+        if config.synchronizer.sync_method == SyncMethod.NCCL:
+            synchronizer = Synchronizer.get_actor(namespace=config.ray_namespace)
+            ray.get(synchronizer.coordinate_weight_sync_setup.remote())
         ray.get(
             [
                 explorer.sync_weight.remote(),
@@ -292,6 +301,14 @@ def both(config: Config) -> StageStatus:
             error=error,
         )
     finally:
+        # Tear down the NCCL weight sync group before shutting down actors.
+        # Best-effort: if actors or Synchronizer are already dead, skip.
+        if config.synchronizer.sync_method == SyncMethod.NCCL:
+            try:
+                synchronizer = Synchronizer.get_actor(namespace=config.ray_namespace)
+                ray.get(synchronizer.coordinate_weight_sync_teardown.remote(), timeout=30)
+            except Exception:
+                logger.warning("Weight sync teardown skipped (actors may have already exited).")
         ray.wait(
             [explorer.shutdown.remote(), trainer.shutdown.remote()],
             timeout=config.synchronizer.sync_timeout,
@@ -367,7 +384,7 @@ def run(
     try:
         if cfg.stages:
             from trinity.manager.state_manager import StateManager
-            from trinity.trainer.verl.utils import get_latest_hf_checkpoint_path
+            from trinity.trainer import get_latest_hf_checkpoint_path
 
             state_manager = StateManager(path=cfg.get_checkpoint_job_dir())
             latest_stage = state_manager.load_stage().get("latest_stage", 0)

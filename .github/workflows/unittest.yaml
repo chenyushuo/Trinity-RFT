@@ -18,7 +18,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        fetch-depth: 1
         path: trinity-${{ github.run_id }}
         ref: refs/pull/${{ github.event.issue.number }}/head
 
@@ -80,8 +80,8 @@ jobs:
       id: diff
       working-directory: trinity-${{ github.run_id }}
       run: |
-        git fetch origin main
-        git diff --name-only origin/main...HEAD > changed_files.txt
+        git fetch --depth=1 origin main
+        git diff --name-only origin/main HEAD > changed_files.txt
         awk -F/ '/^(trinity|tests)\// {print $2}' changed_files.txt | sort | uniq > changed_modules.txt
         : > test_dirs.txt
         while read -r module; do
@@ -150,9 +150,7 @@ jobs:
       uses: ctrf-io/github-test-reporter@v1
       with:
         report-path: trinity-${{ github.run_id }}/report.json
-        summary: true
-        summary-report: true
-        pull-request: false
+        pull-request-report: true
         issue: ${{ github.event.issue.number }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

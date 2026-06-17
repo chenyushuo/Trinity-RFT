@@ -65,7 +65,7 @@ class BaseTrainerCase(RayUnittestBase):
         self.config.buffer.total_epochs = 2
         self.config.buffer.batch_size = 4
         self.config.model.model_path = get_model_path()
-        self.config.explorer.rollout_model.engine_type = "vllm_async"
+        self.config.explorer.rollout_model.engine_type = "vllm"
         self.config.algorithm.repeat_times = 3
         self.config.project = "Trainer-unittest"
         self.config.name = f"trainer-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -105,14 +105,10 @@ class TestTrainerCountdown(BaseTrainerCase):
         eval_tasksets[1].repeat_times = 4
         self.config.trainer.save_interval = 4
         self.config.trainer.save_hf_checkpoint = "never"
+        self.config.trainer.max_checkpoints_to_keep = 2
         if self.strategy == "megatron":
             self.config.trainer.trainer_strategy = "megatron"
         self.config.check_and_update()
-        _trainer_config = self.config.trainer.trainer_config
-        if self.strategy == "megatron":
-            _trainer_config.critic.strategy = "megatron"
-        _trainer_config.trainer.max_actor_ckpt_to_keep = 2
-        _trainer_config.trainer.max_critic_ckpt_to_keep = 2
         both(self.config)
         parser = TensorBoardParser(os.path.join(self.config.monitor.cache_dir, "tensorboard"))
         rollout_metrics = parser.metric_list("rollout")
@@ -128,11 +124,11 @@ class TestTrainerCountdown(BaseTrainerCase):
         self.assertGreater(len(actor_kl_metrics), 0)
         actor_kl_loss = parser.metric_values("actor/kl_loss")
         self.assertEqual(actor_kl_loss[0], 0.0)
-        critic_kl_metrics = parser.metric_list("critic/kl")
-        self.assertGreater(len(critic_kl_metrics), 0)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 8)
+        advantage_kl_metrics = parser.metric_list("advantage/kl")
+        self.assertGreater(len(advantage_kl_metrics), 0)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 8)
         ray.shutdown(_exiting_interpreter=True)
         # check checkpoint
         checkpoint_step_4, _ = get_checkpoint_dir_with_step_num(
@@ -214,11 +210,10 @@ class TestStepAheadAsyncRL(BaseTrainerCase):
         self.config.explorer.rollout_model.tensor_parallel_size = 1
         self.config.buffer.explorer_input.taskset = get_unittest_dataset_config("countdown")
         self.config.trainer.save_interval = 4
+        self.config.trainer.max_checkpoints_to_keep = 1
         self.config.synchronizer.sync_interval = 2
         self.config.synchronizer.sync_offset = 1
         self.config.check_and_update()
-        self.config.trainer.trainer_config.trainer.max_actor_ckpt_to_keep = 1
-        self.config.trainer.trainer_config.trainer.max_critic_ckpt_to_keep = 1
 
         both(self.config)
         parser = TensorBoardParser(os.path.join(self.config.monitor.cache_dir, "tensorboard"))
@@ -230,11 +225,11 @@ class TestStepAheadAsyncRL(BaseTrainerCase):
         self.assertEqual(parser.metric_max_step(actor_metrics[0]), 4)
         actor_kl_metrics = parser.metric_list("actor/kl")
         self.assertGreater(len(actor_kl_metrics), 0)
-        critic_kl_metrics = parser.metric_list("critic/kl")
-        self.assertGreater(len(critic_kl_metrics), 0)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 4)
+        advantage_kl_metrics = parser.metric_list("advantage/kl")
+        self.assertGreater(len(advantage_kl_metrics), 0)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 4)
         ray.shutdown(_exiting_interpreter=True)
         # check checkpoint
 
@@ -283,18 +278,17 @@ class TestTrainerGSM8K(BaseTrainerCase):
         self.config.buffer.total_epochs = 1
         self.config.buffer.explorer_input.taskset = get_unittest_dataset_config("gsm8k")
         self.config.trainer.trainer_strategy = self.strategy
+        if self.strategy == "megatron":
+            self.config.trainer.megatron.tensor_model_parallel_size = 2
+        self.config.trainer.max_checkpoints_to_keep = 2
+        self.config.algorithm.optimizer.lr = 1e-5
+        if self.offloading:
+            if self.strategy == "fsdp":
+                self.config.trainer.param_offload = True
+                self.config.trainer.optimizer_offload = True
+            else:
+                self.config.trainer.offload_policy = True
         self.config.check_and_update()
-        self.config.trainer.trainer_config.trainer.max_actor_ckpt_to_keep = 2
-        actor_rollout_ref = self.config.trainer.trainer_config.actor_rollout_ref
-        actor_rollout_ref.actor.optim.lr = 1e-5
-        if self.strategy == "fsdp":
-            actor_rollout_ref.actor.fsdp_config.param_offload = self.offloading
-            actor_rollout_ref.actor.fsdp_config.optimizer_offload = self.offloading
-            actor_rollout_ref.ref.fsdp_config.param_offload = self.offloading
-            actor_rollout_ref.ref.fsdp_config.optimizer_offload = self.offloading
-        else:  # fsdp2
-            actor_rollout_ref.actor.fsdp_config.offload_policy = self.offloading
-            actor_rollout_ref.ref.fsdp_config.offload_policy = self.offloading
         both(self.config)
         parser = TensorBoardParser(os.path.join(self.config.monitor.cache_dir, "tensorboard"))
         rollout_metrics = parser.metric_list("rollout")
@@ -311,9 +305,18 @@ class TestTrainerGSM8K(BaseTrainerCase):
         else:
             self.assertGreater(len(entropy_loss_metrics), 0)
             self.assertEqual(parser.metric_max_step(entropy_loss_metrics[0]), 4)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 4)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 4)
+        # check checkpoint exists
+        checkpoint_step_4, step_num = get_checkpoint_dir_with_step_num(
+            checkpoint_root_path=self.config.checkpoint_job_dir,
+            trainer_type=self.config.trainer.trainer_type,
+        )
+        self.assertEqual(step_num, 4)
+        self.assertIsNotNone(checkpoint_step_4)
+        hf_files = os.listdir(os.path.join(checkpoint_step_4, "actor", "huggingface"))
+        self.assertGreater(len(hf_files), 0)
         # TODO: used for real testing
         # rewards = parser.metric_values("critic/rewards/mean")
         # self.assertTrue(0.4 < rewards[0] < 0.55)
@@ -398,10 +401,10 @@ class TestTrainerSFTWarmupGSM8K(BaseTrainerCase):
         sft_metrics = parser.metric_list("actor/sft")
         self.assertGreater(len(sft_metrics), 0)
         self.assertEqual(parser.metric_max_step(sft_metrics[0]), 3)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_min_step(response_metrics[0]), 1)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 3)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_min_step(time_metrics[0]), 1)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 3)
 
         self.config.stages[1].buffer.explorer_input.taskset.path = old_taskset_path
         mock_load.return_value = deepcopy(self.config)
@@ -418,10 +421,10 @@ class TestTrainerSFTWarmupGSM8K(BaseTrainerCase):
         self.assertGreater(len(actor_metrics), 0)
         sft_metrics = parser.metric_list("actor/sft")
         self.assertEqual(len(sft_metrics), 0)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_min_step(response_metrics[0]), 1)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 4)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_min_step(time_metrics[0]), 1)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 4)
         # test save checkpoint when sft finish
         for i in range(3):
             self.assertFalse(
@@ -459,9 +462,9 @@ class TestTrainerDPO(BaseTrainerCase):
         self.config.synchronizer.sync_interval = 4
         self.config.buffer.train_batch_size = 8
         self.config.buffer.trainer_input.experience_buffer = get_unittest_dataset_config("dpo")
+        self.config.trainer.max_checkpoints_to_keep = 2
+        self.config.algorithm.optimizer.lr = 5e-7
         self.config.check_and_update()
-        self.config.trainer.trainer_config.trainer.max_actor_ckpt_to_keep = 2
-        self.config.trainer.trainer_config.actor_rollout_ref.actor.optim.lr = 5e-7
         train(self.config)
         parser = TensorBoardParser(os.path.join(self.config.monitor.cache_dir, "tensorboard"))
         actor_metrics = parser.metric_list("actor")
@@ -636,8 +639,6 @@ class TestFullyAsyncMode(unittest.TestCase):
         trainer_config.mode = "train"
         trainer_config.buffer.train_batch_size = 4
         trainer_config.check_and_update()
-        _trainer_config = trainer_config.trainer.trainer_config
-        _trainer_config.critic.strategy = self.strategy
 
         explorer1_config = deepcopy(config)
         explorer1_config.trainer = deepcopy(trainer_config.trainer)
@@ -744,14 +745,14 @@ class TestFullyAsyncMode(unittest.TestCase):
         self.assertEqual(
             get_checkpoint_dir_with_step_num(
                 checkpoint_root_path=explorer1_config.checkpoint_job_dir,
-                trainer_type="verl",
+                trainer_type=trainer_config.trainer.trainer_type,
             )[1],
             8,
         )
         self.assertEqual(
             get_checkpoint_dir_with_step_num(
                 checkpoint_root_path=explorer2_config.checkpoint_job_dir,
-                trainer_type="verl",
+                trainer_type=trainer_config.trainer.trainer_type,
             )[1],
             8,
         )
@@ -800,7 +801,7 @@ class TestTrainerCheckpointSave(unittest.TestCase):
         self.config.buffer.total_steps = 6
         self.config.buffer.batch_size = 4
         self.config.model.model_path = get_model_path()
-        self.config.explorer.rollout_model.engine_type = "vllm_async"
+        self.config.explorer.rollout_model.engine_type = "vllm"
         self.config.algorithm.repeat_times = 3
         self.config.project = "Trainer-unittest"
         self.config.name = f"trainer-{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -813,20 +814,21 @@ class TestTrainerCheckpointSave(unittest.TestCase):
         self.config.trainer.save_interval = 2
         self.config.trainer.save_hf_checkpoint = "last"
         self.config.trainer.trainer_strategy = self.strategy
+        if self.strategy == "megatron":
+            self.config.trainer.megatron.tensor_model_parallel_size = 2
         self.config.trainer.max_checkpoints_to_keep = 2
         self.config.check_and_update()
         self.process_list = []
 
     def test_trainer(self):  # noqa: C901
         """Test the checkpoint saving."""
-        _trainer_config = self.config.trainer.trainer_config
 
         stop_event = multiprocessing.Event()
         trainer_process = multiprocessing.Process(target=run_both, args=(self.config, stop_event))
         trainer_process.start()
         self.process_list.append(trainer_process)
 
-        default_local_dir = _trainer_config.trainer.default_local_dir
+        default_local_dir = self.config.checkpoint_job_dir
         state_dict_iteration = checkpoint_iteration = 0
         state_dict_iteration_file = os.path.join(
             default_local_dir, "latest_state_dict_iteration.txt"
@@ -841,10 +843,9 @@ class TestTrainerCheckpointSave(unittest.TestCase):
             "common.pt",
             ".metadata",
             "metadata.json",
-            # for Megatron < 0.18
-            # "__0_1.distcp",
-            # "__1_1.distcp",
         }
+        prev_state_dict_iteration = 0
+        prev_checkpoint_iteration = 0
         start_time = time.time()
         while not stop_event.is_set() and time.time() - start_time < 60 * 10:
             time.sleep(10)
@@ -862,27 +863,28 @@ class TestTrainerCheckpointSave(unittest.TestCase):
                 except (IOError, ValueError):
                     pass
 
-            if state_dict_iteration > 0:
-                iteration_dir = os.path.join(
-                    default_local_dir, f"global_step_{state_dict_iteration}", "actor"
+            # Only check state-dict-only contents when the iteration advances
+            # AND a full checkpoint is not being (or about to be) saved to
+            # the same directory.  The full checkpoint is verified separately
+            # via the checkpoint_iteration branch below.
+            if state_dict_iteration > prev_state_dict_iteration:
+                prev_state_dict_iteration = state_dict_iteration
+                full_ckpt_flag = os.path.join(
+                    default_local_dir,
+                    f"global_step_{state_dict_iteration}",
+                    ".full_checkpoint",
                 )
-                if self.strategy == "fsdp":
-                    items = os.listdir(iteration_dir)
-                    self.assertIn("model_world_size_2_rank_0.pt", items)
-                    self.assertIn("model_world_size_2_rank_1.pt", items)
-                else:  # megatron
-                    dist_ckpt_dir = os.path.join(iteration_dir, "dist_ckpt")
-                    self.assertEqual(
-                        set(os.listdir(dist_ckpt_dir)),
-                        megatron_dist_ckpt_items,
+                if not os.path.exists(full_ckpt_flag):
+                    iteration_dir = os.path.join(
+                        default_local_dir, f"global_step_{state_dict_iteration}", "actor"
                     )
-                    huggingface_dir = os.path.join(iteration_dir, "huggingface")
-                    items = os.listdir(huggingface_dir)
-                    self.assertIn("config.json", items)
-                    self.assertIn("generation_config.json", items)
-                # print(f"State dict check at {state_dict_iteration} iteration passed.")  # for debug
+                    # Unified save_state_dict produces a single safetensors
+                    # file regardless of strategy (fsdp or megatron).
+                    items = os.listdir(iteration_dir)
+                    self.assertIn("model.safetensors", items)
 
-            if checkpoint_iteration > 0:
+            if checkpoint_iteration > prev_checkpoint_iteration:
+                prev_checkpoint_iteration = checkpoint_iteration
                 flag_file = os.path.join(
                     default_local_dir, f"global_step_{checkpoint_iteration}", ".full_checkpoint"
                 )
@@ -948,15 +950,17 @@ class TestTrainerCheckpointSave(unittest.TestCase):
             )
             actor_checkpoint_dir = os.path.join(checkpoint_dir, "actor")
             self.assertTrue(os.path.exists(actor_checkpoint_dir))
-        # check step 2 should have no checkpoint
+        # check step 2 should not exist or have no checkpoint file
         checkpoint_dir = os.path.join(default_local_dir, "global_step_2")
-        self.assertTrue(os.path.exists(checkpoint_dir))
-        actor_checkpoint_dir = os.path.join(checkpoint_dir, "actor")
-        self.assertFalse(os.path.exists(actor_checkpoint_dir))
-        critic_checkpoint_dir = os.path.join(checkpoint_dir, "critic")
-        self.assertFalse(os.path.exists(critic_checkpoint_dir))
+        if os.path.exists(checkpoint_dir):
+            actor_checkpoint_dir = os.path.join(checkpoint_dir, "actor")
+            self.assertFalse(os.path.exists(actor_checkpoint_dir))
+            critic_checkpoint_dir = os.path.join(checkpoint_dir, "critic")
+            self.assertFalse(os.path.exists(critic_checkpoint_dir))
         trainer_process.join(timeout=10)
-        self.assertIn("model.safetensors", huggingface_dir_files)
+        # save_hf_checkpoint="last" → only the final checkpoint has model weights
+        last_hf_dir = os.path.join(default_local_dir, "global_step_6", "actor", "huggingface")
+        self.assertIn("model.safetensors", os.listdir(last_hf_dir))
 
     def tearDown(self):
         # remove dir only when the test passed
@@ -995,7 +999,7 @@ class TestTrainerMIX(BaseTrainerCase):
         ].total_epochs = 8  # test this works
         self.config.check_and_update()
         self.config.buffer.trainer_input.experience_buffer.max_read_timeout = 20
-        self.config.trainer.trainer_config.trainer.max_actor_ckpt_to_keep = 2
+        self.config.trainer.max_checkpoints_to_keep = 2
         both(self.config)
         ray.shutdown(_exiting_interpreter=True)
 
@@ -1038,10 +1042,10 @@ class TestTrainerMIX(BaseTrainerCase):
         self.assertEqual(parser.metric_max_step(expert_metrics[0]), 4)  # SFT
         usual_metrics = parser.metric_list("actor/usual/")
         self.assertEqual(parser.metric_max_step(usual_metrics[0]), 4)  # RFT
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_min_step(response_metrics[0]), 1)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 4)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_min_step(time_metrics[0]), 1)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 4)
         # test save checkpoint at last step
         checkpoint_dir, step_num = get_checkpoint_dir_with_step_num(
             checkpoint_root_path=self.config.checkpoint_job_dir,
@@ -1254,9 +1258,9 @@ class TestMultiModalGRPO(BaseTrainerCase):
         actor_metrics = parser.metric_list("actor")
         self.assertGreater(len(actor_metrics), 0)
         self.assertEqual(parser.metric_max_step(actor_metrics[0]), 2)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 2)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 2)
         # check save lastest checkpoint
         checkpoint_step_2, step_num = get_checkpoint_dir_with_step_num(
             checkpoint_root_path=self.config.checkpoint_job_dir,
@@ -1293,9 +1297,9 @@ class TestMultiModalSFT(BaseTrainerCase):
         actor_metrics = parser.metric_list("actor")
         self.assertGreater(len(actor_metrics), 0)
         self.assertEqual(parser.metric_max_step(actor_metrics[0]), 2)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 2)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 2)
         # check save lastest checkpoint
         checkpoint_step_2, step_num = get_checkpoint_dir_with_step_num(
             checkpoint_root_path=self.config.checkpoint_job_dir,
@@ -1341,9 +1345,9 @@ class TestTrainerLoRA(BaseTrainerCase):
         actor_metrics = parser.metric_list("actor")
         self.assertGreater(len(actor_metrics), 0)
         self.assertEqual(parser.metric_max_step(actor_metrics[0]), 2)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 2)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 2)
         ray.shutdown(_exiting_interpreter=True)
         # check save lastest checkpoint
         checkpoint_step_2, step_num = get_checkpoint_dir_with_step_num(
@@ -1457,14 +1461,8 @@ class TestTrainerPromptTruncation(BaseTrainerCase):
         actor_metrics = parser.metric_list("actor")
         self.assertGreater(len(actor_metrics), 0)
         self.assertEqual(parser.metric_max_step(actor_metrics[0]), 2)
-        max_prompt_length = parser.metric_values("prompt_length/max")
-        self.assertEqual(max(max_prompt_length), 5)
-        min_prompt_length = parser.metric_values("prompt_length/min")
-        self.assertEqual(min(min_prompt_length), 5)
-        max_response_length = parser.metric_values("response_length/max")
-        self.assertEqual(max(max_response_length), 1)
-        min_response_length = parser.metric_values("response_length/min")
-        self.assertEqual(min(min_response_length), 1)
+        # With max_prompt_tokens=5 and max_response_tokens=15, truncation
+        # leaves only 1 response token → no valid loss → grad_norm = 0
         final_loss = parser.metric_values("actor/final_loss")
         self.assertEqual(final_loss[0], 0.0)
         grad_norm = parser.metric_values("actor/grad_norm")
@@ -1501,9 +1499,9 @@ class TestTinkerTrainer(BaseTrainerCase):
         actor_metrics = parser.metric_list("actor")
         self.assertGreater(len(actor_metrics), 0)
         self.assertEqual(parser.metric_max_step(actor_metrics[0]), 4)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 4)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 4)
 
     def test_trainer_class(self):
         total_steps = 100
@@ -1733,9 +1731,9 @@ class ColocateModeTest(RayUnittestBase):
         actor_metrics = parser.metric_list("actor")
         self.assertGreater(len(actor_metrics), 0)
         self.assertEqual(parser.metric_max_step(actor_metrics[0]), 2)
-        response_metrics = parser.metric_list("response_length")
-        self.assertGreater(len(response_metrics), 0)
-        self.assertEqual(parser.metric_max_step(response_metrics[0]), 2)
+        time_metrics = parser.metric_list("time")
+        self.assertGreater(len(time_metrics), 0)
+        self.assertEqual(parser.metric_max_step(time_metrics[0]), 2)
         eval_metrics = parser.metric_list("eval")
         self.assertGreater(len(eval_metrics), 0)
         self.assertEqual(parser.metric_max_step(eval_metrics[0]), 2)

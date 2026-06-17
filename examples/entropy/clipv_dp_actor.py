@@ -27,7 +27,7 @@ from verl.utils.ulysses import (
     ulysses_pad_and_slice_inputs,
 )
 
-from trinity.trainer.verl.dp_actor import DataParallelPPOActor as OriginalDPActor
+from trinity.trainer.verl_legacy.dp_actor import DataParallelPPOActor as OriginalDPActor
 
 __all__ = ["DataParallelPPOActor"]
 

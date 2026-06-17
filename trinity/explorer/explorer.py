@@ -17,12 +17,7 @@ import torch
 from trinity.buffer.buffer import get_buffer_reader
 from trinity.buffer.task_scheduler import get_taskset_scheduler
 from trinity.common.config import Config
-from trinity.common.constants import (
-    ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
-    RunningStatus,
-    SyncMethod,
-    SyncStyle,
-)
+from trinity.common.constants import RunningStatus, SyncMethod, SyncStyle
 from trinity.common.models.allocator import Allocator
 from trinity.common.models.model import ModelWrapper
 from trinity.explorer.rollout_coordinator import RolloutCoordinator
@@ -109,12 +104,19 @@ class Explorer:
         self.logger.info("Rollout models are ready. Continue weight sync initialization.")
 
     async def setup_weight_sync_group(
-        self, master_address: str, master_port: int, state_dict_meta: List = None
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int = None,
+        group_name: str = None,
+        timeout: int = None,
     ):
         await self._wait_for_models_ready()
         base_offset = 1 if self.use_nccl_sync else 0
-        gpu_num_per_model: int = self.config.explorer.rollout_model.gpu_num
-        world_size = len(self.models) * gpu_num_per_model + base_offset
+        gpu_per_engine: int = self.config.explorer.rollout_model.gpu_per_engine
+        world_size = world_size or len(self.models) * gpu_per_engine + base_offset
+        timeout = timeout or self.config.synchronizer.sync_timeout
+        group_name = group_name or self.config.synchronizer.group_name
         self.logger.info(
             f"Initialize process group for weight synchronization, "
             f"master_address={master_address}, master_port={master_port}, "
@@ -125,22 +127,34 @@ class Explorer:
             model.init_process_group(
                 master_address=master_address,
                 master_port=master_port,
-                rank_offset=i * gpu_num_per_model + base_offset,
+                rank_offset=i * gpu_per_engine + base_offset,
                 world_size=world_size,
-                group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
-                explorer_name=self.config.explorer.name,
-                timeout=self.config.synchronizer.sync_timeout,
-                state_dict_meta=state_dict_meta,
+                group_name=group_name,
+                timeout=timeout,
             )
             for i, model in enumerate(self.models)
         ]
+        await asyncio.gather(*refs)
+
+    async def set_state_dict_meta(self, state_dict_meta: List):
+        """Set the state_dict meta on all model workers for NCCL weight sync.
+
+        Must be called after setup_weight_sync_group and before the first
+        sync_model_weights call.
+        """
+        refs = [model.set_state_dict_meta(state_dict_meta) for model in self.models]
+        await asyncio.gather(*refs)
+
+    async def teardown_weight_sync_group(self):
+        """Destroy the NCCL process group on all model workers."""
+        refs = [model.teardown_process_group() for model in self.models]
         await asyncio.gather(*refs)
 
     async def setup_model_level_weight_sync_group(self):
         """Setup process group for each model, only used in serve mode."""
         await self._wait_for_models_ready()
         refs = []
-        world_size = self.config.explorer.rollout_model.gpu_num
+        world_size = self.config.explorer.rollout_model.gpu_per_engine
         for model in self.models:
             master_address, master_port = await model.get_available_address_async(random_port=True)
             self.logger.info(
@@ -154,8 +168,7 @@ class Explorer:
                     master_port=master_port,
                     rank_offset=0,
                     world_size=world_size,
-                    group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
-                    explorer_name=self.config.explorer.name,
+                    group_name=self.config.synchronizer.group_name,
                     timeout=self.config.synchronizer.sync_timeout,
                 )
             )
@@ -163,7 +176,8 @@ class Explorer:
 
     async def _checkpoint_weights_update(self, step_num: Optional[int] = None) -> int:
         self.logger.info(f"Start to update model weights from checkpoint at step {step_num}.")
-        step_num = await self.synchronizer.set_model_state_dict_with_step_num.remote(step_num)
+        if step_num is None:
+            step_num = await self.synchronizer.get_latest_model_version.remote()
         if step_num is None or step_num <= self.model_version:
             self.logger.warning(
                 f"No new checkpoint found for step {step_num}. Current model version: {self.model_version}."

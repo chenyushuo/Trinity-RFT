@@ -152,7 +152,7 @@ class TestLauncherMain(unittest.IsolatedAsyncioTestCase):
             call_kwargs.kwargs.get("port", call_kwargs.args[0] if call_kwargs.args else None), 9999
         )
 
-    @mock.patch("trinity.trainer.verl.utils.get_latest_hf_checkpoint_path")
+    @mock.patch("trinity.trainer.get_latest_hf_checkpoint_path")
     @mock.patch("trinity.cli.launcher.both")
     @mock.patch("trinity.cli.launcher.train")
     @mock.patch("trinity.cli.launcher.load_config")
@@ -261,7 +261,7 @@ class TestLauncherMain(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mock_train.call_args[0][0].model.model_path, config.model.model_path)
             self.assertEqual(mock_both.call_args[0][0].model.model_path, "/path/to/hf/checkpoint")
             self.assertEqual(
-                mock_both.call_args[0][0].trainer.trainer_config.actor_rollout_ref.model.path,
+                mock_both.call_args[0][0].buffer.trainer_input.experience_buffer.tokenizer_path,
                 "/path/to/hf/checkpoint",
             )
 

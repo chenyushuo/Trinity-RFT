@@ -98,6 +98,8 @@ class VLLMTestBase(RayUnittestBaseAsync):
 @parameterized_class(
     (
         "tensor_parallel_size",
+        "data_parallel_size",
+        "pipeline_parallel_size",
         "engine_num",
         "nnodes",
         "repeat_times",
@@ -106,9 +108,10 @@ class VLLMTestBase(RayUnittestBaseAsync):
         "enable_return_routed_experts",
     ),
     [
-        (2, 2, 1, 1, True, False, False),
-        (1, 2, 1, 1, False, True, False),
-        (4, 1, 2, 4, True, True, True),
+        (2, 1, 1, 2, 1, 1, True, False, True),
+        (1, 2, 1, 2, 1, 1, True, False, False),
+        (1, 1, 2, 2, 1, 1, False, True, False),
+        (4, 1, 1, 1, 2, 4, True, True, True),
     ],
 )
 class ModelWrapperTest(VLLMTestBase):
@@ -130,10 +133,19 @@ class ModelWrapperTest(VLLMTestBase):
         self.config.explorer.rollout_model.engine_num = self.engine_num
         self.config.explorer.rollout_model.nnodes = self.nnodes
         self.config.explorer.rollout_model.tensor_parallel_size = self.tensor_parallel_size
+        self.config.explorer.rollout_model.data_parallel_size = self.data_parallel_size
+        self.config.explorer.rollout_model.pipeline_parallel_size = self.pipeline_parallel_size
+        self.config.explorer.rollout_model.enable_expert_parallel = (
+            self.enable_return_routed_experts
+        )
         self.config.algorithm.repeat_times = self.repeat_times
         self.config.explorer.rollout_model.enable_history = self.enable_history
         self.config.explorer.rollout_model.enable_openai_api = self.enable_return_routed_experts
         self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
+        self.config.explorer.rollout_model.extra_engine_args = {"max_num_seqs": 24}
+        if self.enable_return_routed_experts:
+            self.config.explorer.rollout_model.extra_engine_args["moe_backend"] = "triton"
+            self.config.explorer.rollout_model.extra_engine_args["gdn_prefill_backend"] = "triton"
         self.config.algorithm.enable_router_replay = self.enable_return_routed_experts
         self.config.check_and_update()
 
@@ -1497,7 +1509,7 @@ class TestSuperLongGeneration(VLLMTestBase):
 
     async def test_generate(self):
         base_dir = os.path.dirname(__file__)
-        target_dir = os.path.join(base_dir, "..", "..", "trinity", "trainer", "verl")
+        target_dir = os.path.join(base_dir, "..", "..", "trinity", "trainer", "verl_legacy")
         with open(os.path.join(target_dir, "fsdp_workers.py")) as f:
             fsdp_code = f.read()
         with open(os.path.join(target_dir, "megatron_workers.py")) as f:

@@ -21,7 +21,7 @@ from trinity.utils.log import get_logger
 from trinity.utils.lora_utils import create_dummy_lora
 
 if TYPE_CHECKING:
-    from trinity.trainer.verl.verl_config import FSDPConfig
+    from trinity.trainer.verl_legacy.verl_config import FSDPConfig
 
 
 class ConfigValidator(ABC):
@@ -151,7 +151,7 @@ class RayClusterConfigValidator(ConfigValidator):
                 p for p in [config.project, config.group, config.name] if p
             )
 
-        if config.model.tinker.enable or config.model.external_model.enable:
+        if config.model.tinker.enable:
             return
 
         # check cluster infomation
@@ -236,11 +236,11 @@ class RayClusterConfigValidator(ConfigValidator):
 
         if config.mode != "train":
             cluster.rollout_gpu_num = (
-                self._get_model_gpu_num(config.explorer.rollout_model)
+                config.explorer.rollout_model.gpu_per_engine
                 * config.explorer.rollout_model.engine_num
             )
             cluster.auxiliary_model_gpu_num = sum(
-                self._get_model_gpu_num(model) * model.engine_num
+                model.gpu_per_engine * model.engine_num
                 for model in config.explorer.auxiliary_models
             )
         cluster.explorer_gpu_num = cluster.rollout_gpu_num + cluster.auxiliary_model_gpu_num
@@ -261,9 +261,9 @@ class RayClusterConfigValidator(ConfigValidator):
                 raise ValueError(
                     "In colocate mode, `explorer.rollout_model.engine_num` must be set to 1."
                 )
-            if self._get_model_gpu_num(config.explorer.rollout_model) != 1:
+            if config.explorer.rollout_model.gpu_per_engine != 1:
                 raise ValueError(
-                    "In colocate mode, `explorer.rollout_model.gpu_num` must be set to 1."
+                    "In colocate mode, `explorer.rollout_model.gpu_per_engine` must be set to 1."
                 )
             if len(config.explorer.auxiliary_models) > 0:
                 raise ValueError("In colocate mode, auxiliary models are not supported.")
@@ -311,47 +311,53 @@ class RayClusterConfigValidator(ConfigValidator):
     def _validate_multinode_inference_models(self, config: Config) -> None:
         """Validate per-engine multi-node inference settings.
 
-        For now, cross-node inference engines are only supported for vLLM-backed
-        rollout and auxiliary models.
+        Cross-node inference engines are supported for vLLM and SGLang.
+        The validation is based on the inferred launch mode:
+        - SINGLE_NODE: each actor runs a self-contained engine.
+          When nnodes>1 and DP>1, the allocator expands into engine_num*DP actors.
+        - HEADLESS: cross-node TP/PP, nnodes = (TP*PP) / gpu_per_node (DP=1 only).
         """
 
         model_configs = [config.explorer.rollout_model, *config.explorer.auxiliary_models]
         for model_config in model_configs:
-            if model_config.nnodes == 1:
+            if model_config.engine_type in ["tinker", "external"]:
+                model_config.gpu_per_engine = 0
+                model_config.nnodes = 1
                 continue
 
-            if (
-                not model_config.engine_type.startswith("vllm")
-                and model_config.engine_type != "sglang"
-            ):
-                raise ValueError(
-                    "Multi-node inference is only supported for vLLM and SGLang engines."
-                )
+            model_config.gpu_per_engine = (
+                model_config.data_parallel_size
+                * model_config.tensor_parallel_size
+                * model_config.pipeline_parallel_size
+            )
 
-            if model_config.nnodes < 1:
-                raise ValueError(f"`nnodes` must be >= 1, but got {model_config.nnodes}.")
+            if model_config.gpu_per_engine > config.cluster.gpu_per_node:
+                # multi node engine
+                if model_config.gpu_per_engine % config.cluster.gpu_per_node != 0:
+                    raise ValueError(
+                        f"Multi-node inference requires gpu_per_engine to be a multiple of "
+                        f"cluster.gpu_per_node ({config.cluster.gpu_per_node}), but got "
+                        f"gpu_per_engine={model_config.gpu_per_engine}."
+                    )
+                model_config.nnodes = model_config.gpu_per_engine // config.cluster.gpu_per_node
+            else:
+                model_config.nnodes = 1
 
-            if model_config.nnodes > config.cluster.node_num:
-                raise ValueError(
-                    f"`nnodes` ({model_config.nnodes}) cannot exceed cluster.node_num "
-                    f"({config.cluster.node_num})."
-                )
-
-            model_gpu_num = self._get_model_gpu_num(model_config)
-
-            if model_gpu_num % config.cluster.gpu_per_node != 0:
-                raise ValueError(
-                    f"gpu_num ({model_gpu_num}) must be an "
-                    f"integer multiple of cluster.gpu_per_node ({config.cluster.gpu_per_node}) "
-                    "when `nnodes > 1`, because each cross-node engine must occupy full nodes."
-                )
-
-            required_nnodes = model_gpu_num // config.cluster.gpu_per_node
-            if model_config.nnodes != required_nnodes:
-                raise ValueError(
-                    f"`nnodes` ({model_config.nnodes}) must equal gpu_num // "
-                    f"cluster.gpu_per_node ({required_nnodes}) when `nnodes > 1`."
-                )
+            # vllm specific check
+            if model_config.engine_type.startswith("vllm"):
+                # vllm only support single node data parallel
+                if model_config.data_parallel_size > 1 and model_config.nnodes > 1:
+                    raise ValueError("vLLM does not support data parallelism in multi-node setups.")
+            elif model_config.engine_type == "sglang":
+                # sglang requires tensor_parallel_size % data_parallel_size == 0
+                # see sglang/srt/server_args.py for details
+                if model_config.tensor_parallel_size % model_config.data_parallel_size != 0:
+                    raise ValueError(
+                        f"SGLang inference requires tensor_parallel_size "
+                        f"to be a multiple of data_parallel_size, but got "
+                        f"tensor_parallel_size={model_config.tensor_parallel_size} and "
+                        f"data_parallel_size={model_config.data_parallel_size}."
+                    )
 
 
 class AlgorithmConfigValidator(ConfigValidator):
@@ -694,6 +700,8 @@ class ExplorerConfigValidator(ConfigValidator):
             config.algorithm.enable_router_replay
         )
         config.explorer.rollout_model.ray_namespace = config.ray_namespace
+        config.explorer.rollout_model.sync_method = config.synchronizer.sync_method
+        config.explorer.rollout_model.checkpoint_job_dir = config.checkpoint_job_dir
         if (
             config.mode == "colocate"
             and config.explorer.rollout_model.gpu_memory_utilization > 0.25
@@ -750,40 +758,19 @@ class ExplorerConfigValidator(ConfigValidator):
 
     def _validate_inference_parallel_config(self, model_config, model_name: str) -> None:
         if model_config.engine_type in {"tinker", "external"}:
-            model_config.data_parallel_size = 1
-            model_config.pipeline_parallel_size = 1
+            model_config.tensor_parallel_size = 0
+            model_config.data_parallel_size = 0
+            model_config.pipeline_parallel_size = 0
             model_config.enable_expert_parallel = False
-            model_config.gpu_num = 0
+            model_config.gpu_per_engine = 0
+            model_config.nnodes = 1
+            model_config.node_rank = 0
             return
 
         for key in ["tensor_parallel_size", "data_parallel_size", "pipeline_parallel_size"]:
             value = getattr(model_config, key)
             if value < 1:
                 raise ValueError(f"`{model_name}.{key}` must be >= 1, but got {value}.")
-
-        expected_gpu_num = (
-            model_config.tensor_parallel_size
-            * model_config.data_parallel_size
-            * model_config.pipeline_parallel_size
-        )
-        if model_config.gpu_num is None:
-            model_config.gpu_num = expected_gpu_num
-        elif model_config.gpu_num != expected_gpu_num:
-            raise ValueError(
-                f"`{model_name}.gpu_num` ({model_config.gpu_num}) must equal "
-                "tensor_parallel_size * data_parallel_size * pipeline_parallel_size "
-                f"({expected_gpu_num})."
-            )
-
-        if model_config.gpu_num < 1:
-            raise ValueError(
-                f"`{model_name}.gpu_num` must be >= 1, but got {model_config.gpu_num}."
-            )
-        if model_config.gpu_num % model_config.nnodes != 0:
-            raise ValueError(
-                f"`{model_name}.gpu_num` ({model_config.gpu_num}) must be divisible by "
-                f"`nnodes` ({model_config.nnodes})."
-            )
 
     def _validate_lora(self, config: Config) -> None:
         """Process and validate LoRA configuration settings.
@@ -1274,10 +1261,7 @@ class TrainerConfigValidator(ConfigValidator):
             ValueError: If trainer type is invalid, deprecated config path is used,
                        or save checkpoint strategy is invalid.
         """
-        if (
-            config.mode not in ["train", "both", "colocate"]
-            and config.trainer.trainer_strategy != "megatron"
-        ):
+        if config.mode not in ["train", "both", "colocate"]:
             return
 
         if config.model.external_model.enable:
@@ -1286,6 +1270,8 @@ class TrainerConfigValidator(ConfigValidator):
         config.trainer.trust_remote_code = config.model.trust_remote_code
 
         if config.trainer.trainer_type == "verl":
+            from trinity.trainer.trainer import is_verl_legacy
+
             if config.trainer.ulysses_sequence_parallel_size < 1:
                 self.logger.warning(
                     "Ulysses sequence parallel size is set to 1 "
@@ -1293,35 +1279,37 @@ class TrainerConfigValidator(ConfigValidator):
                 )
                 config.trainer.ulysses_sequence_parallel_size = 1
 
-            if config.trainer.trainer_config:
-                from trinity.trainer.verl.verl_config import veRLConfig
-
-                config.trainer.trainer_config = build_dataclass_from_mapping(
-                    veRLConfig, config.trainer.trainer_config
+            if config.trainer.max_token_len_per_gpu is None:
+                if config.trainer.trainer_strategy.startswith("fsdp"):
+                    parallel_size = config.trainer.ulysses_sequence_parallel_size
+                else:
+                    parallel_size = config.trainer.megatron.context_parallel_size
+                config.trainer.max_token_len_per_gpu = math.ceil(
+                    config.model.max_model_len / parallel_size  # type: ignore [operator]
                 )
+
+            if is_verl_legacy():
+                if config.trainer.trainer_config:
+                    from trinity.trainer.verl_legacy.verl_config import veRLConfig
+
+                    config.trainer.trainer_config = build_dataclass_from_mapping(
+                        veRLConfig, config.trainer.trainer_config
+                    )
             elif config.trainer.trainer_config_path:
                 raise ValueError(
                     "`trainer_config_path` is deprecated; please use `trainer_config` instead."
                 )
             else:
-                from trinity.trainer.verl.verl_config import veRLConfig
+                from trinity.trainer.verl_legacy.verl_config import veRLConfig
 
                 self.logger.info("`trainer_config` is not provided, using default trainer config.")
                 config.trainer.trainer_config = veRLConfig()
-            if config.trainer.max_token_len_per_gpu is None:
-                if config.trainer.trainer_strategy.startswith("fsdp"):
-                    parallel_size = config.trainer.ulysses_sequence_parallel_size
-                else:
-                    parallel_size = config.trainer.trainer_config.actor_rollout_ref.actor.megatron.context_parallel_size
-                config.trainer.max_token_len_per_gpu = math.ceil(
-                    config.model.max_model_len / parallel_size  # type: ignore [operator]
-                )
+            config.trainer.trainer_config.synchronize_config(config)
             if config.trainer.save_hf_checkpoint not in {"last", "always", "never"}:
                 raise ValueError(
                     f"Invalid trainer.save_hf_checkpoint: {config.trainer.save_hf_checkpoint}, "
                     "must be one of 'last', 'always', or 'never'."
                 )
-            config.trainer.trainer_config.synchronize_config(config)
         elif config.trainer.trainer_type == "tinker":
             config.trainer.trainer_config = None
         else:
@@ -1526,7 +1514,11 @@ class GPUMemoryValidator(ConfigValidator):
         Raises:
             ValueError: If estimated memory usage exceeds safe limits and suggestions are not bypassed.
         """
-        from trinity.trainer.verl.verl_config import veRLConfig
+        if config.trainer.trainer_config is None:
+            self.logger.info("GPU memory check skipped: trainer_config is not set.")
+            return
+
+        from trinity.trainer.verl_legacy.verl_config import veRLConfig
 
         self.pytorch_env_flag = (
             os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "") == "expandable_segments:True"

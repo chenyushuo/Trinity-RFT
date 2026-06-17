@@ -641,6 +641,12 @@ class veRLConfig:
                 )
                 self.critic.strategy = "fsdp"
 
+        # Offloading — propagate from Trinity config to fsdp_config
+        for component in [actor_config, ref_config]:
+            component.fsdp_config.param_offload = config.trainer.param_offload
+            component.fsdp_config.optimizer_offload = config.trainer.optimizer_offload
+            component.fsdp_config.offload_policy = config.trainer.offload_policy
+
         # Algorithm related config
         optim_config = config.algorithm.optimizer
         for field_name in optim_config.__dataclass_fields__:
@@ -703,6 +709,26 @@ class veRLConfig:
         self.actor_rollout_ref.actor.megatron.use_remove_padding = use_remove_padding
         self.actor_rollout_ref.ref.megatron.use_remove_padding = use_remove_padding
         self.critic.megatron.use_remove_padding = use_remove_padding
+
+        # Megatron parallelism — only relevant when strategy is megatron.
+        # Use object.__setattr__ because verl's BaseConfig freezes these fields.
+        if config.trainer.trainer_strategy.startswith("megatron"):
+            mg = config.trainer.megatron
+            for mcore_cfg in [
+                self.actor_rollout_ref.actor.megatron,
+                self.actor_rollout_ref.ref.megatron,
+                self.critic.megatron,
+            ]:
+                for attr in (
+                    "tensor_model_parallel_size",
+                    "pipeline_model_parallel_size",
+                    "virtual_pipeline_model_parallel_size",
+                    "expert_model_parallel_size",
+                    "expert_tensor_parallel_size",
+                    "context_parallel_size",
+                    "sequence_parallel",
+                ):
+                    object.__setattr__(mcore_cfg, attr, getattr(mg, attr))
 
         # TODO: check other fields
         self.enable_preview = config.trainer.enable_preview

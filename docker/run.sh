@@ -2,7 +2,6 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
-DEFAULT_MODULE="common"
 SERVICE_NAME="trinity-node-1"
 
 print_help() {
@@ -12,14 +11,17 @@ Usage: bash docker/run.sh [options]
 Run pytest inside a Trinity Docker container.
 
 Options:
-  -m, --module <name>    Test module under tests/. Default: ${DEFAULT_MODULE}
+  -m, --module <path>    Test target under tests/ (directory or file). Default: tests/
   -k, --keyword <expr>   Pytest -k expression used to filter tests
+  -q, --quiet            Run pytest in quiet mode
   -h, --help             Show this help message and exit
 
 Examples:
   bash docker/run.sh
   bash docker/run.sh --module buffer
+  bash docker/run.sh --module trainer/trainer_test
   bash docker/run.sh --module common --keyword test_config
+  bash docker/run.sh --module common --keyword test_config --quiet
 EOF
 }
 
@@ -37,8 +39,9 @@ require_arg() {
     fi
 }
 
-module_name="$DEFAULT_MODULE"
+module_name=""
 keyword_expr=""
+quiet_mode=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             require_arg "$1" "$2"
             keyword_expr="$2"
             shift 2
+            ;;
+        -q|--quiet)
+            quiet_mode=1
+            shift
             ;;
         -h|--help)
             print_help
@@ -77,8 +84,16 @@ if ! init_docker_compose; then
     exit 1
 fi
 
-if [[ ! -d "$SCRIPT_DIR/../tests/${module_name}" ]]; then
-    fail "Test module 'tests/${module_name}' does not exist."
+test_target="tests"
+if [[ -n "$module_name" ]]; then
+    candidate_target="tests/${module_name}"
+    if [[ -d "$SCRIPT_DIR/../${candidate_target}" || -f "$SCRIPT_DIR/../${candidate_target}" ]]; then
+        test_target="$candidate_target"
+    elif [[ -f "$SCRIPT_DIR/../${candidate_target}.py" ]]; then
+        test_target="${candidate_target}.py"
+    else
+        fail "Test target '${candidate_target}' does not exist."
+    fi
 fi
 
 container_id="$("${COMPOSE_CMD[@]}" ps -a -q "$SERVICE_NAME" 2>/dev/null)"
@@ -91,7 +106,13 @@ if [[ -z "$running_id" ]]; then
     fail "Container '${SERVICE_NAME}' exists but is not running. Start it before running tests."
 fi
 
-pytest_args=(pytest "tests/${module_name}" -v -s)
+pytest_args=(pytest "$test_target" -s)
+if [[ "$quiet_mode" -eq 1 ]]; then
+    pytest_args+=(-q)
+else
+    pytest_args+=(-v)
+fi
+
 if [[ -n "$keyword_expr" ]]; then
     pytest_args+=(-k "$keyword_expr")
 fi

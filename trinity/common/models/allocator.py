@@ -53,7 +53,7 @@ class Allocator:
         bundle_actor_map: Dict[int, str] = {}
         bundle_id = 0
         for role, config in model_configs:
-            gpus_per_bundle = config.gpu_num // config.nnodes  # type: ignore
+            gpus_per_bundle = config.gpu_per_engine // config.nnodes
             for engine_id in range(config.engine_num):
                 for node_id in range(config.nnodes):
                     bundles.append({"GPU": float(gpus_per_bundle), "CPU": 1})
@@ -81,10 +81,12 @@ class Allocator:
     ) -> ModelWrapper:
         config = deepcopy(config)
         config.engine_id = engine_id
+
         actor_bundle_lists = []
         for node_id in range(config.nnodes):
             actor_name = self.get_actor_name(role, engine_id, node_id)
             actor_bundle_lists.append((actor_name, self.bundle_result.actor_bundle_map[actor_name]))
+
         model_cls = None
         if config.engine_type.startswith("vllm"):
             from trinity.common.models.vllm_model import vLLMRolloutModel
@@ -97,13 +99,6 @@ class Allocator:
         elif config.engine_type == "tinker":
             from trinity.common.models.tinker_model import TinkerModel
 
-            config.tensor_parallel_size = 0
-            config.data_parallel_size = 0
-            config.pipeline_parallel_size = 0
-            config.enable_expert_parallel = False
-            config.gpu_num = 0
-            config.nnodes = 1
-            config.node_rank = 0
             model_cls = TinkerModel
         elif config.engine_type == "external":
             return await get_external_model_wrapper(config=config)
@@ -175,11 +170,15 @@ async def get_model_wrapper(
 ) -> ModelWrapper:
     """Get the Ray actor wrapper for the inference model.
 
+    Creates Ray actors with appropriate GPU allocation and distributed communication
+    setup based on the inferred launch mode.
+
     Args:
         actor_cls: The actor class to instantiate (e.g., vLLMRolloutModel, SGLangRolloutModel).
         config (InferenceModelConfig): The model config.
         pg (PlacementGroup): The placement group for the actors.
-        actor_bundle_list (List[Tuple[str, int]]): The list of (actor_name, bundle_id) tuples for distributed setup.
+        actor_bundle_list (List[Tuple[str, int]]): The list of (actor_name, bundle_id) tuples
+            for distributed setup.
     Returns:
         ModelWrapper: A wrapper for the model actors with distributed communication setup.
     """
@@ -192,7 +191,7 @@ async def get_model_wrapper(
             ray.remote(actor_cls)
             .options(
                 name=actor_name,
-                num_gpus=engine_config.gpu_num / engine_config.nnodes,  # type: ignore
+                num_gpus=engine_config.gpu_per_engine / engine_config.nnodes,
                 namespace=engine_config.ray_namespace,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,

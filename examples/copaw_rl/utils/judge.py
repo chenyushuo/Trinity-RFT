@@ -191,8 +191,12 @@ GRADER_PLAN_BY_DOMAIN: Dict[str, list[GraderSpec]] = {
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
     "script_evaluation": [
-        GraderSpec("ScriptGrader", "script_evaluation", weight=_env_float("JUDGE_SCRIPT_WEIGHT", 1.0)),
-        GraderSpec("CorrectnessGrader", "correctness", weight=_env_float("JUDGE_CORRECTNESS_WEIGHT", 1.0)),
+        GraderSpec(
+            "ScriptGrader", "script_evaluation", weight=_env_float("JUDGE_SCRIPT_WEIGHT", 1.0)
+        ),
+        GraderSpec(
+            "CorrectnessGrader", "correctness", weight=_env_float("JUDGE_CORRECTNESS_WEIGHT", 1.0)
+        ),
         GraderSpec("TrajectoryGrader", "trajectory"),
     ],
 }

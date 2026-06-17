@@ -85,12 +85,17 @@ from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.megatron_workers import logger, set_random_seed
 
 from trinity.common.config import AlgorithmConfig
-from trinity.common.constants import ROLLOUT_WEIGHT_SYNC_GROUP_NAME, SyncMethod
 from trinity.manager.synchronizer import Synchronizer
-from trinity.trainer.verl.megatron_actor import MegatronPPOActor
-from trinity.trainer.verl.megatron_checkpoint_manager import MegatronCheckpointManager
-from trinity.trainer.verl.utils import patch_rope_theta_in_hf_config
-from trinity.utils.distributed import init_process_group
+from trinity.trainer.verl_legacy.megatron_actor import MegatronPPOActor
+from trinity.trainer.verl_legacy.megatron_checkpoint_manager import (
+    MegatronCheckpointManager,
+)
+from trinity.trainer.verl_legacy.utils import (
+    patch_rope_theta_in_hf_config,
+    rank0_iterator,
+    save_rank0_safetensors,
+)
+from trinity.utils.distributed import WeightTransferEngine
 from trinity.utils.log import get_logger
 
 
@@ -311,6 +316,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
+        self._rollout_engine_type = self.config.get("rollout_engine_type", "vllm")
+        self.weight_transfer_engine = None
 
         # NOTE(sgm): We utilize colocate WorkerGroup by default.
         # As a result, Workers for different model share the same process.
@@ -717,6 +724,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         get_torch_device().empty_cache()
         log_gpu_memory_usage("After init_model finish", logger=self.logger)
 
+        self._cache_state_dict_meta()
+
     def _get_tensor_generator(self):
         """
         This part of the code is written by referring to the initialization of the `MegatronVLLMShardingManager` class
@@ -742,49 +751,66 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             )
         return per_tensor_param
 
+    def _cache_state_dict_meta(self):
+        """Cache state_dict meta at init time for lightweight get_weight_sync_info."""
+        if not self._is_actor:
+            return
+        aggressive_empty_cache(force_sync=True)
+        set_expandable_segments(False)
+        self.state_dict_meta = []
+
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module)
+        for name, weight in self._get_tensor_generator():
+            self.state_dict_meta.append(
+                (name, str(weight.dtype).split(".")[-1], tuple(weight.shape))
+            )
+            del weight
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+        torch.distributed.barrier()
+        torch.cuda.empty_cache()
+        self.logger.info(f"Cached state_dict meta: {len(self.state_dict_meta)} parameters")
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def setup_weight_sync_group(self):
-        if self.config.synchronizer.sync_method == SyncMethod.NCCL:
-            aggressive_empty_cache(force_sync=True)
-            set_expandable_segments(False)
-            self.state_dict_meta = []
+    def get_weight_sync_info(self):
+        """Return (addr, port, state_dict_meta) from rank 0. Other ranks return None."""
+        if torch.distributed.get_rank() == 0:
+            master_address, master_port = self.get_available_master_addr_port()
+            self.logger.info(f"Weight sync info: {master_address}:{master_port}")
+            return master_address, int(master_port), self.state_dict_meta
+        return None
 
-            if self._is_offload_param:
-                load_megatron_model_to_gpu(self.actor_module)
-            for name, weight in self._get_tensor_generator():
-                self.state_dict_meta.append(
-                    (name, str(weight.dtype).split(".")[-1], tuple(weight.shape))
-                )
-                del weight
-            if self._is_offload_param:
-                offload_megatron_model_to_cpu(self.actor_module)
-            torch.distributed.barrier()
-            torch.cuda.empty_cache()
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def setup_weight_sync_group(
+        self,
+        master_address: str,
+        master_port: int,
+        world_size: int,
+        group_name: str,
+        timeout: int,
+    ):
+        """Join the NCCL process group for weight sync."""
+        if torch.distributed.get_rank() == 0:
+            self.logger.info(
+                f"Trainer init_process_group {master_address}:{master_port} ({world_size})."
+            )
+            self.weight_transfer_engine = WeightTransferEngine.create(
+                engine_type=self._rollout_engine_type,
+                master_address=master_address,
+                master_port=master_port,
+                world_size=world_size,
+                group_name=group_name,
+            )
+            self.logger.info("Trainer init_process_group done.")
 
-            if torch.distributed.get_rank() == 0:
-                master_address, master_port = self.get_available_master_addr_port()
-                world_size = self.config.synchronizer.explorer_world_size + 1
-                self.logger.info(
-                    f"Trainer init_process_group {master_address}:{master_port} ({world_size})."
-                )
-                synchronizer = Synchronizer.get_actor(
-                    namespace=self.config.synchronizer.ray_namespace
-                )
-                setup_ref = synchronizer.setup_weight_sync_group.remote(
-                    master_address, master_port, self.state_dict_meta
-                )
-                timeout = self.config.synchronizer.sync_timeout
-
-                self._model_update_group = init_process_group(
-                    host=master_address,
-                    port=master_port,
-                    group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
-                    backend="nccl",
-                    timeout=timeout,
-                    world_size=world_size,
-                    rank=0,
-                )
-                ray.get(setup_ref)
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def teardown_weight_sync_group(self):
+        """Destroy the NCCL process group for weight sync."""
+        if torch.distributed.get_rank() == 0 and self.weight_transfer_engine is not None:
+            self.logger.info("Tearing down weight sync group.")
+            self.weight_transfer_engine.teardown()
+            self.weight_transfer_engine = None
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def sync_weight(self):
@@ -793,12 +819,17 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
-        for name, weight in self._get_tensor_generator():
-            if torch.distributed.get_rank() == 0:
-                torch.distributed.broadcast(weight.contiguous(), 0, group=self._model_update_group)
-            del weight
+        weight_iterator = rank0_iterator(self._get_tensor_generator())
         if torch.distributed.get_rank() == 0:
+            if self.weight_transfer_engine is None:
+                raise RuntimeError("Weight sync group has not been initialized.")
+            self.logger.info("Starting NCCL weight sync broadcast.")
+            self.weight_transfer_engine.sync_weight(iterator=weight_iterator)
             torch.cuda.synchronize()
+            self.logger.info("Finished NCCL weight sync broadcast.")
+        else:
+            for _ in weight_iterator:
+                pass
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
         torch.distributed.barrier()
@@ -812,7 +843,8 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
         state_dict = {}
-        for name, weight in self._get_tensor_generator():
+        weight_iterator = rank0_iterator(self._get_tensor_generator())
+        for name, weight in weight_iterator:
             if torch.distributed.get_rank() == 0:
                 state_dict[name] = weight.cpu().detach()
             del weight
@@ -1003,15 +1035,28 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         checkpoint_path,
         global_step=0,
     ):
+        rank = torch.distributed.get_rank()
+        aggressive_empty_cache(force_sync=True)
+        set_expandable_segments(False)
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
-        self.checkpoint_mananager.save_state_dict(
-            local_path=checkpoint_path,
-            global_step=global_step,
+        if rank == 0:
+            os.makedirs(checkpoint_path, exist_ok=True)
+        filepath = os.path.join(checkpoint_path, "model.safetensors")
+        save_rank0_safetensors(
+            per_tensor_param=self._get_tensor_generator(),
+            filepath=filepath,
+            state_dict_meta=self.state_dict_meta,
         )
-        torch.distributed.barrier()
+        if rank == 0:
+            self.logger.info(
+                f"[Megatron] state_dict saved: path={checkpoint_path}, step={global_step}"
+                " (optimizer/extra skipped)"
+            )
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
+        torch.distributed.barrier()
+        torch.cuda.empty_cache()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(

@@ -101,7 +101,7 @@ class TestMaskResponseTruncatedOperator(unittest.TestCase):
 class TestMathDAPORewardFn(unittest.TestCase):
     @patch("trinity.common.rewards.dapo_reward.compute_score")
     def test_symmetric_accuracy(self, mock_compute_score):
-        mock_compute_score.side_effect = [1.0, 0.0]
+        mock_compute_score.side_effect = [(1.0, "42"), (0.0, "41")]
         fn = MathDAPORewardFn(enable_overlong_penalty=False)
         good = fn(response="x", response_token=torch.zeros(10), truth="42")
         bad = fn(response="y", response_token=torch.zeros(10), truth="42")

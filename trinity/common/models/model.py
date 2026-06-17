@@ -12,6 +12,7 @@ import ray
 import torch
 from ray.actor import ActorHandle
 from torch import Tensor
+from transformers import AutoConfig
 
 from trinity.common.config import InferenceModelConfig
 from trinity.common.constants import RunningStatus, SyncMethod
@@ -76,17 +77,26 @@ class InferenceModel(ABC):
         rank_offset: int,
         world_size: int,
         group_name: str,
-        explorer_name: str,
         backend: str = "nccl",
         timeout: int = 1200,
-        state_dict_meta: Optional[List] = None,
     ):
         """Initialize the process group for model weight synchronization."""
         pass
 
+    async def teardown_process_group(self):
+        """Destroy the process group for model weight synchronization."""
+        pass
+
+    async def set_state_dict_meta(self, state_dict_meta: List):
+        """Set the state_dict meta for NCCL weight sync."""
+        pass
+
     @abstractmethod
     async def sync_model_weights(
-        self, model_version: int, method: SyncMethod, timeout: float = 1200
+        self,
+        model_version: int,
+        method: SyncMethod,
+        timeout: float = 1200,
     ) -> int:
         """Sync the model with the latest model_version."""
 
@@ -160,6 +170,7 @@ class BaseInferenceModel(InferenceModel):
             self.chat_template = self.config.chat_template
         self.action_mask_method = get_action_mask_method(self.chat_template)
         self.enable_thinking = config.enable_thinking
+        self._routed_experts_layout: Optional[Tuple[int, int, Optional[int]]] = None
 
     def apply_chat_template(
         self,
@@ -185,6 +196,54 @@ class BaseInferenceModel(InferenceModel):
             )
         return prompt
 
+    def _get_routed_experts_layout(self) -> Tuple[int, int, Optional[int]]:
+        """Read and memoize the MoE routing layout ``(num_layers, topk, num_experts)``."""
+        if self._routed_experts_layout is None:
+            model_path = self.config.model_path
+            if model_path is None:
+                raise ValueError("model_path must be provided to read routed_experts layout.")
+            hf_config = AutoConfig.from_pretrained(
+                model_path, trust_remote_code=self.config.trust_remote_code
+            )
+            text_config = getattr(hf_config, "text_config", hf_config)
+            num_layers = getattr(text_config, "num_hidden_layers", None)
+            topk = getattr(text_config, "num_experts_per_tok", None)
+            # Qwen* exposes ``num_experts``; DeepSeek* exposes ``n_routed_experts``.
+            num_experts = getattr(text_config, "num_experts", None) or getattr(
+                text_config, "n_routed_experts", None
+            )
+            if num_layers is None or topk is None:
+                raise ValueError(
+                    "Model config must expose num_hidden_layers and num_experts_per_tok "
+                    "to use routed_experts."
+                )
+            self._routed_experts_layout = (
+                int(num_layers),
+                int(topk),
+                int(num_experts) if num_experts is not None else None,
+            )
+        return self._routed_experts_layout
+
+    def _build_dummy_routed_experts(self) -> torch.Tensor:
+        """Build routed_experts for dummy (prompt-truncated) experiences.
+        These tokens are fully masked from the loss but still flow through the MoE
+        forward during router replay, so the indices must be valid and spread across
+        experts.
+        """
+        num_layers, topk, num_experts = self._get_routed_experts_layout()
+        if num_experts is None:
+            raise ValueError(
+                "Model config must expose num_experts (or n_routed_experts) to build "
+                "dummy routed_experts when enable_return_routed_experts is True."
+            )
+        seq_len = self.config.max_prompt_tokens
+        if seq_len is None:
+            raise ValueError(
+                "max_prompt_tokens must be set to build dummy routed_experts for truncated prompts."
+            )
+        idx = torch.arange(seq_len * num_layers * topk, dtype=torch.int64) % num_experts
+        return idx.reshape(seq_len, num_layers, topk).to(torch.uint8)
+
     def _handle_prompt_truncation(self, prompt: str, **kwargs) -> Tuple[Sequence, bool]:
         """Handle prompt truncation if needed."""
         # Tokenize once without truncation to check if truncation is needed
@@ -203,6 +262,11 @@ class BaseInferenceModel(InferenceModel):
             dummy_response = "[This experience is masked out due to overlong prompt]"
 
             token_ids = prompt_token_ids[: self.config.max_prompt_tokens + 1]
+
+            routed_experts = None
+            if getattr(self.config, "enable_return_routed_experts", False):
+                routed_experts = self._build_dummy_routed_experts()
+
             return [
                 Experience(
                     tokens=token_ids,
@@ -212,6 +276,7 @@ class BaseInferenceModel(InferenceModel):
                     response_text=dummy_response,
                     truncate_status="prompt_truncated",
                     reward=0.0,
+                    routed_experts=routed_experts,
                 )
                 for _ in range(kwargs.get("n", 1))
             ], False  # If prompt truncation is activated, return a list of dummy experiences & False
@@ -256,6 +321,11 @@ class BaseInferenceModel(InferenceModel):
                 f"Warning: {prompt_length=} exceeds the length limit {self.config.max_prompt_tokens}, "
                 f"this experience will be not counted in the loss computation."
             )
+
+            routed_experts = None
+            if getattr(self.config, "enable_return_routed_experts", False):
+                routed_experts = self._build_dummy_routed_experts()
+
             return Experience(
                 tokens=token_ids[: self.config.max_prompt_tokens + 1],
                 logprobs=torch.zeros(1, dtype=torch.float32),
@@ -263,6 +333,7 @@ class BaseInferenceModel(InferenceModel):
                 action_mask=torch.zeros(1, dtype=torch.bool),  # ignored in loss computation
                 messages=messages,  # messages are not truncated
                 truncate_status=truncate_status,
+                routed_experts=routed_experts,
             )
 
         # Truncate response if it exceeds max_model_len
@@ -751,9 +822,7 @@ class ModelWrapper:
         rank_offset: int,
         world_size: int,
         group_name: str,
-        explorer_name: str,
         timeout: int = 1200,
-        state_dict_meta: Optional[List] = None,
     ):
         """Initialize the process group for model weight synchronization."""
 
@@ -763,14 +832,23 @@ class ModelWrapper:
             rank_offset=rank_offset,
             world_size=world_size,
             group_name=group_name,
-            explorer_name=explorer_name,
             backend="nccl",
             timeout=timeout,
-            state_dict_meta=state_dict_meta,
         )
 
+    async def teardown_process_group(self):
+        """Destroy the process group for model weight synchronization."""
+        await self.model.teardown_process_group.remote()
+
+    async def set_state_dict_meta(self, state_dict_meta: List):
+        """Set the state_dict meta for NCCL weight sync."""
+        await self.model.set_state_dict_meta.remote(state_dict_meta)
+
     async def sync_model_weights(
-        self, model_version: int, method: SyncMethod, timeout: int = 1200
+        self,
+        model_version: int,
+        method: SyncMethod,
+        timeout: float = 1200,
     ) -> None:
         """Sync the model weights"""
         await self.model.sync_model_weights.remote(model_version, method, timeout=timeout)

@@ -1,6 +1,4 @@
-"""Utils for ccompatibility issues with verl."""
-
-import os
+"""Utils for compatibility issues with verl."""
 from logging import Logger
 from typing import List
 
@@ -9,9 +7,7 @@ import torch
 from transformers import PreTrainedModel
 from verl import DataProto
 from verl.trainer.ppo.metric_utils import _compute_response_info
-from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 
-from trinity.common.config import Config
 from trinity.common.experience import (
     Experience,
     gather_action_masks,
@@ -79,6 +75,7 @@ def to_data_proto(  # noqa: C901
         "unique_ids": np.array([exp.eid.uid for exp in experiences]),
         "position_ids": position_ids,
         "input_ids": tokens,
+        "prompts": tokens[:, :max_prompt_length],
         "responses": tokens[:, max_prompt_length:],
         "attention_mask": attention_mask,
         "response_mask": gather_action_masks(experiences, max_response_length),
@@ -292,158 +289,3 @@ def compute_data_metrics(batch: DataProto) -> dict:
         )
 
     return metrics
-
-
-def get_latest_hf_checkpoint_path(config: Config):
-    """Get the latest huggingface checkpoint path"""
-    if config.trainer.trainer_type != "verl":
-        raise ValueError("This function is only for verl trainer.")
-    checkpoint_dir = find_latest_ckpt_path(config.checkpoint_job_dir)
-    hf_checkpoint_dir = os.path.join(checkpoint_dir, "actor", "huggingface")
-    if not os.path.exists(hf_checkpoint_dir):
-        raise ValueError(f"No huggingface checkpoint found in {hf_checkpoint_dir}")
-    return hf_checkpoint_dir
-
-
-# modified from verl/utils/fsdp_utils.py:apply_fsdp2
-# bug fix for transformers v5
-def apply_fsdp2(model, fsdp_kwargs, config):
-    """model: AutoModelForCausalLM"""
-    import torch.nn as nn
-    from verl.utils.fsdp_utils import (
-        CPUOffloadPolicy,
-        fully_shard,
-        maybe_patch_fsdp_module,
-    )
-
-    assert (
-        CPUOffloadPolicy is not None
-    ), "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
-
-    default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
-    fsdp_transformer_layer_cls_to_wrap = config.get("wrap_policy", {}).get(
-        "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
-    )
-
-    if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
-        fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
-
-    assert len(fsdp_transformer_layer_cls_to_wrap) > 0
-
-    modules = []
-    for name, module in model.named_modules():
-        if module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap or (
-            isinstance(module, nn.Embedding) and not model.config.tie_word_embeddings
-        ):
-            modules.append(module)
-
-    for idx, module in enumerate(modules):
-        with maybe_patch_fsdp_module(module):
-            fully_shard(module, **fsdp_kwargs)
-
-    with maybe_patch_fsdp_module(model):
-        fully_shard(model, **fsdp_kwargs)  # fsdp2 will not reshard_after_forward for root module
-
-
-# modified from verl/utils/seqlen_balancing.py:rearrange_micro_batches
-def rearrange_micro_batches(
-    batch,
-    max_token_len,
-    dp_group=None,
-    num_batches_divided_by=None,
-    same_micro_num_in_dp=True,
-    min_num_micro_batch=None,
-    use_dynamic_bsz_balance=True,
-):
-    """
-    Split a batch into micro-batches by total token count, with optional DP sync and padding.
-
-    Args:
-        batch (TensorDict): must include "attention_mask" (B*S); other fields are sliced similarly.
-        max_token_len (int): max sum of attention_mask per micro-batch.
-        dp_group (optional): torch.distributed group for data-parallel sync.
-        num_batches_divided_by (optional): virtual pipeline parallel size, for megatron.
-        same_micro_num_in_dp (bool): if True and dp_group set, pad all ranks to the same count.
-        min_num_micro_batch (int, optional): force at least this many splits (pads empty ones).
-        use_dynamic_bsz_balance (bool, optional): balance the computational workload between micro-batches
-
-    Returns:
-        List[TensorDict]: the micro-batches.
-        List[List[int]]: index lists mapping each micro-batch back to original positions.
-    """
-    from torch import distributed as dist
-    from verl.utils import tensordict_utils as tu
-    from verl.utils.device import get_device_name
-    from verl.utils.seqlen_balancing import (
-        calculate_workload,
-        ceildiv,
-        get_seqlen_balanced_partitions,
-        roundup_divisible,
-    )
-
-    # this is per local micro_bsz
-    input_ids = batch["input_ids"]
-    if input_ids.is_nested:
-        seq_len_effective: torch.Tensor = input_ids.offsets().diff()
-    else:
-        seq_len_effective: torch.Tensor = batch["attention_mask"].sum(dim=1)
-    max_seq_len = seq_len_effective.max().item()
-
-    assert (
-        max_token_len >= max_seq_len
-    ), f"max_token_len must be greater than the sequence length. Got {max_token_len=} and {max_seq_len=}"
-    total_seqlen = seq_len_effective.sum().item()
-    # NOTE: num_microbatches <= batch_size, so take the min of this two.
-    num_micro_batches = min(len(seq_len_effective), ceildiv(total_seqlen, max_token_len))
-    if min_num_micro_batch is not None:
-        # used to support pp
-        num_micro_batches = max(min_num_micro_batch, num_micro_batches)
-    if dist.is_initialized() and same_micro_num_in_dp:
-        num_micro_batches = torch.tensor([num_micro_batches], device=get_device_name())
-        dist.all_reduce(num_micro_batches, op=dist.ReduceOp.MAX, group=dp_group)
-        num_micro_batches = num_micro_batches.cpu().item()
-    if num_batches_divided_by is not None:
-        num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
-
-    assert num_micro_batches <= len(seq_len_effective)
-
-    # note that seq_len_effective is a GPU tensor. We need to make it a list to avoid D2H!
-    workloads = calculate_workload(seq_len_effective).cpu().tolist()
-    micro_bsz_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
-
-    if use_dynamic_bsz_balance:
-        # Use the sum of squared sequence lengths to approximate attention computation workload
-        micro_bsz_idx.sort(
-            key=lambda partition: (
-                sum(workloads[idx] for idx in partition),
-                partition[0] if partition else 0,
-            ),
-            reverse=True,
-        )
-        # Place smaller micro-batches at both ends to reduce the bubbles exposed during the warm-up and cool-down.
-        micro_bsz_idx = micro_bsz_idx[::2][::-1] + micro_bsz_idx[1::2]
-
-    micro_batches = []
-
-    for partition in micro_bsz_idx:
-        curr_micro_batch = tu.index_select_tensor_dict(batch, partition)
-        micro_batches.append(curr_micro_batch)
-
-    return micro_batches, micro_bsz_idx
-
-
-# add rope_theta to hf config for backward compatibility, can be removed after verl is updated
-def patch_rope_theta_in_hf_config(hf_config):
-    if not hasattr(hf_config, "rope_theta"):
-        if hasattr(hf_config, "rope_parameters"):
-            rope_parameters = hf_config.rope_parameters
-        elif hasattr(hf_config, "text_config") and hasattr(
-            hf_config.text_config, "rope_parameters"
-        ):
-            rope_parameters = hf_config.text_config.rope_parameters
-        else:
-            rope_parameters = {}
-
-        rope_theta = rope_parameters.get("rope_theta", None)
-        if rope_theta is not None:
-            setattr(hf_config, "rope_theta", rope_theta)

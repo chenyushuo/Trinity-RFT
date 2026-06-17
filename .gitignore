@@ -65,6 +65,7 @@ ipython_config.py
 # Environments
 .env
 docker/env
+docker/remote.env
 .venv
 env/
 venv/
