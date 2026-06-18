@@ -1295,16 +1295,16 @@ class TrainerConfigValidator(ConfigValidator):
                     config.trainer.trainer_config = build_dataclass_from_mapping(
                         veRLConfig, config.trainer.trainer_config
                     )
-            elif config.trainer.trainer_config_path:
-                raise ValueError(
-                    "`trainer_config_path` is deprecated; please use `trainer_config` instead."
-                )
-            else:
-                from trinity.trainer.verl_legacy.verl_config import veRLConfig
+                elif config.trainer.trainer_config_path:
+                    raise ValueError(
+                        "`trainer_config_path` is deprecated; please use `trainer_config` instead."
+                    )
+                else:
+                    from trinity.trainer.verl_legacy.verl_config import veRLConfig
 
-                self.logger.info("`trainer_config` is not provided, using default trainer config.")
-                config.trainer.trainer_config = veRLConfig()
-            config.trainer.trainer_config.synchronize_config(config)
+                    self.logger.info("`trainer_config` is not provided, using default trainer config.")
+                    config.trainer.trainer_config = veRLConfig()
+                config.trainer.trainer_config.synchronize_config(config)
             if config.trainer.save_hf_checkpoint not in {"last", "always", "never"}:
                 raise ValueError(
                     f"Invalid trainer.save_hf_checkpoint: {config.trainer.save_hf_checkpoint}, "
