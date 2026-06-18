@@ -100,7 +100,7 @@ class ExperienceStorageTest(RayUnittestBaseAsync):
         _, metrics, _ = await self.sample_strategy.sample(step=step)
         self.assertGreaterEqual(
             metrics["sample/model_version/min"],
-            step - max_staleness,
+            max(step - max_staleness - 1, 0),
             f"Min model version mismatch at step {step}",
         )
 
@@ -159,15 +159,12 @@ class ExperienceStorageTest(RayUnittestBaseAsync):
         # init testing data
         exps_list = self._default_exp_list()
         steps = self._default_steps()
-        expected_model_versions_map = {}
-        for step in steps:
-            predict_version = max(step - max_staleness, 0)
-            expected_model_versions_map[step] = [
-                predict_version + i // self.exp_write_batch_size
-                for i in range(self.config.buffer.train_batch_size)
-            ]
 
-        await self._verify_sampling_model_versions(exps_list, expected_model_versions_map)
+        await self._flexible_verify_sampling_model_versions(
+            exps_list,
+            steps,
+            max_staleness,
+        )
 
     def _simulate_priority_queue(self, steps, max_staleness=float("inf")):
         expected_model_versions_map = {}

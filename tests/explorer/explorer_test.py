@@ -33,7 +33,7 @@ from trinity.common.config import (
     InferenceModelConfig,
     OperatorConfig,
 )
-from trinity.common.constants import StorageType
+from trinity.common.constants import StorageType, SyncStyle
 from trinity.explorer.explorer import Explorer
 from trinity.explorer.proxy.client import TrinityClient
 from trinity.manager.state_manager import StateManager
@@ -118,6 +118,7 @@ def _build_fake_coordinator_explorer():
     explorer.explore_step_num = 0
     explorer.model_version = 7
     explorer.detailed_stats = False
+    explorer.sync_style = SyncStyle.FIXED
     explorer.config = SimpleNamespace(
         explorer=SimpleNamespace(
             over_rollout=SimpleNamespace(return_partial_tasks=False),

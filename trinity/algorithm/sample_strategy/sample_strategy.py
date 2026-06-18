@@ -16,7 +16,10 @@ class SampleStrategy(ABC):
 
     def set_model_version_metric(self, exp_list: List[Experience], metrics: Dict):
         metric_list = [
-            {"model_version": exp.info["model_version"]}
+            {
+                "model_version": exp.info["model_version"],
+                "model_version_drift": exp.info.get("model_version_drift", 0),
+            }
             for exp in exp_list
             if "model_version" in exp.info
         ]

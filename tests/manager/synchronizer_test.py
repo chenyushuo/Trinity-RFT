@@ -62,13 +62,13 @@ def explorer_monkey_patch(explore_step_time_list: List[int]):
         self.explore_step_num += 1
         return True
 
-    async def new_finish_explore_step(self: Explorer, step: int, model_version: int) -> None:
-        metric = {"rollout/model_version": model_version}
+    async def new_finish_explore_step(self: Explorer, step: int) -> None:
+        metric = {"rollout/model_version": self.model_version}
         await asyncio.sleep(explore_step_time_list[step - 1])
         dummy_exps = [
             Experience(
                 tokens=torch.tensor([0, 1, 2]),
-                info={"model_version": model_version},
+                info={"model_version": self.model_version},
             )
             for _ in range(self.config.buffer.train_batch_size)
         ]

@@ -112,6 +112,7 @@ class SyncStyle(CaseInsensitiveEnum, metaclass=SyncStyleEnumMeta):
     FIXED = "fixed"
     TRAINER_DRIVEN = "trainer_driven"
     EXPLORER_DRIVEN = "explorer_driven"
+    FULLY_ASYNC = "fully_async"
 
 
 class SaveStrategy(CaseInsensitiveEnum):

@@ -381,7 +381,6 @@ class WorkflowRunner:
         collect_partial_runs: bool = True,
     ) -> Tuple[Status, bytes]:
         """Run the task and return the states."""
-        # TODO: avoid sending the experiences back to the scheduler to reduce the communication overhead
         st = time.time()
         try:
             model_version = await self.model_wrapper.model_version_async
@@ -395,6 +394,7 @@ class WorkflowRunner:
                 run_id_base,
                 collect_partial_runs=collect_partial_runs,
             )
+            model_version_after = await self.model_wrapper.model_version_async
             exps = execution_result.experiences
             if execution_result.status.completed_runs > 0:
                 assert exps is not None and len(exps) > 0, "An empty experience is generated"
@@ -407,6 +407,7 @@ class WorkflowRunner:
                 if not hasattr(exp, "info") or exp.info is None:
                     exp.info = {}
                 exp.info["model_version"] = model_version
+                exp.info["model_version_drift"] = model_version_after - model_version
                 exp.info["use_count"] = 0
                 exp.info["task_index"] = task.index
 

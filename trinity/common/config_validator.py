@@ -999,6 +999,42 @@ class BufferConfigValidator(ConfigValidator):
         self._check_trainer_input(config)
         self._check_data_processor(config)
 
+    def _fill_taskset_config(
+        self, taskset: TasksetConfig, config: Config, index: int, is_eval: bool = False
+    ):
+        if not taskset.path:
+            prefix = "Eval taskset" if is_eval else "Train taskset"
+            raise ValueError(f"{prefix} [{taskset}]'s path is not configured.")
+
+        if not taskset.name:
+            prefix = "eval_" if is_eval else ""
+            taskset.name = f"{prefix}taskset_{index}"
+        taskset.is_eval = is_eval
+
+        taskset.batch_size = config.buffer.batch_size
+        if not is_eval:
+            taskset.total_epochs = config.buffer.total_epochs
+            taskset.total_steps = config.buffer.total_steps
+            if taskset.repeat_times != config.algorithm.repeat_times:
+                taskset.repeat_times = config.algorithm.repeat_times
+                self.logger.info(
+                    "`buffer.explorer_input.taskset.repeat_times` is set to "
+                    f"`algorithm.repeat_times` (={config.algorithm.repeat_times})."
+                )
+
+        set_if_none(
+            taskset, "default_workflow_type", config.buffer.explorer_input.default_workflow_type
+        )
+        set_if_none(
+            taskset, "default_reward_fn_type", config.buffer.explorer_input.default_reward_fn_type
+        )
+        set_if_none(taskset, "ray_namespace", config.ray_namespace)
+        for attr in ["temperature", "top_p", "top_k", "logprobs"]:
+            set_if_none(taskset.rollout_args, attr, getattr(config.model, attr))
+        set_if_none(taskset.rollout_args, "max_tokens", config.model.max_response_tokens)
+        set_if_none(taskset.format, "chat_template", config.model.custom_chat_template)
+        taskset.workflow_args["checkpoint_job_dir"] = config.checkpoint_job_dir
+
     def _check_explorer_input(self, config: Config):
         """Validate explorer input configuration including tasksets and selectors.
 
@@ -1028,38 +1064,13 @@ class BufferConfigValidator(ConfigValidator):
         elif config.mode != "bench" and len(explorer_input.tasksets) == 0:
             raise ValueError("At least one taskset should be provided in explorer_input!")
 
-        def _fill_taskset_config(taskset: TasksetConfig, index: int, is_eval: bool = False):
-            if not taskset.path:
-                prefix = "Eval taskset" if is_eval else "Train taskset"
-                raise ValueError(f"{prefix} [{taskset}]'s path is not configured.")
-
-            if not taskset.name:
-                prefix = "eval_" if is_eval else ""
-                taskset.name = f"{prefix}taskset_{index}"
-            taskset.is_eval = is_eval
-
-            taskset.batch_size = config.buffer.batch_size
-            if not is_eval:
-                taskset.total_epochs = config.buffer.total_epochs
-                taskset.total_steps = config.buffer.total_steps
-                if taskset.repeat_times != config.algorithm.repeat_times:
-                    taskset.repeat_times = config.algorithm.repeat_times
-                    self.logger.info(
-                        "`buffer.explorer_input.taskset.repeat_times` is set to "
-                        f"`algorithm.repeat_times` (={config.algorithm.repeat_times})."
-                    )
-
-            set_if_none(taskset, "default_workflow_type", explorer_input.default_workflow_type)
-            set_if_none(taskset, "default_reward_fn_type", explorer_input.default_reward_fn_type)
-            set_if_none(taskset, "ray_namespace", config.ray_namespace)
-            for attr in ["temperature", "top_p", "top_k", "logprobs"]:
-                set_if_none(taskset.rollout_args, attr, getattr(config.model, attr))
-            set_if_none(taskset.rollout_args, "max_tokens", config.model.max_response_tokens)
-            set_if_none(taskset.format, "chat_template", config.model.custom_chat_template)
-            taskset.workflow_args["checkpoint_job_dir"] = config.checkpoint_job_dir
+        if config.synchronizer.sync_style == SyncStyle.FULLY_ASYNC and explorer_input.eval_tasksets:
+            raise ValueError(
+                "Eval tasksets are not supported in fully asynchronous synchronization style."
+            )
 
         for i, taskset in enumerate(explorer_input.tasksets):
-            _fill_taskset_config(taskset, i)
+            self._fill_taskset_config(taskset, config, i)
 
             # check if selector is supported
             if taskset.task_selector is not None:
@@ -1077,7 +1088,7 @@ class BufferConfigValidator(ConfigValidator):
         for idx, taskset in enumerate(explorer_input.eval_tasksets):
             # eval_workflow has higher priority than workflow in eval tasksets, so we set it first
             set_if_none(taskset, "default_workflow_type", explorer_input.default_eval_workflow_type)
-            _fill_taskset_config(taskset, idx, is_eval=True)
+            self._fill_taskset_config(taskset, config, idx, is_eval=True)
 
     def _check_trainer_input(self, config: Config):
         """Validate trainer input configuration including experience buffers.
@@ -1201,15 +1212,10 @@ class BufferConfigValidator(ConfigValidator):
             "serve",
             "colocate",
         }:
-            if experience_pipeline.save_input and experience_pipeline.input_save_path is None:
-                experience_pipeline.input_save_path = self._default_storage_path(
-                    config, StorageType.SQL.value, "explorer_output"
-                )
-                self.logger.info(
-                    "Auto set `data_processor.experience_pipeline.input_save_path` "
-                    f"to {experience_pipeline.input_save_path}"
-                )
-
+            # NOTE: the default for `experience_pipeline.input_save_path` is
+            # resolved by ExperiencePipeline._init_input_storage (the component
+            # that actually creates the database), so that callers without a
+            # full validation pass (e.g. `trinity view`) resolve the same path.
             if config.service.data_juicer is not None:
                 for operator in experience_pipeline.operators:
                     if operator.name == "data_juicer":
@@ -1514,7 +1520,9 @@ class GPUMemoryValidator(ConfigValidator):
         Raises:
             ValueError: If estimated memory usage exceeds safe limits and suggestions are not bypassed.
         """
-        if config.trainer.trainer_config is None:
+        from trinity.trainer import is_verl_legacy
+
+        if config.trainer.trainer_config is None or not is_verl_legacy():
             self.logger.info("GPU memory check skipped: trainer_config is not set.")
             return
 

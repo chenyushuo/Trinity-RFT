@@ -54,9 +54,9 @@ class Monitor(ABC):
         self.role = role
         self.config = config
 
-    @abstractmethod
     def log_table(self, table_name: str, experiences_table: pd.DataFrame, step: int):
         """Log a table"""
+        pass
 
     @abstractmethod
     def log(self, data: dict, step: int, commit: bool = False) -> None:
@@ -105,9 +105,6 @@ class TensorboardMonitor(Monitor):
         os.makedirs(self.tensorboard_dir, exist_ok=True)
         self.logger = SummaryWriter(self.tensorboard_dir)
         self.console_logger = get_logger(__name__, in_ray_actor=True)
-
-    def log_table(self, table_name: str, experiences_table: pd.DataFrame, step: int):
-        pass
 
     def log(self, data: dict, step: int, commit: bool = False) -> None:
         """Log metrics."""
@@ -288,10 +285,6 @@ class SwanlabMonitor(Monitor):
 
         self.logger = swanlab.init(**init_kwargs)
         self.console_logger = get_logger(__name__, in_ray_actor=True)
-
-    def log_table(self, table_name: str, experiences_table: pd.DataFrame, step: int):
-        # Not support log table yet
-        pass
 
     def log(self, data: dict, step: int, commit: bool = False) -> None:
         """Log metrics."""

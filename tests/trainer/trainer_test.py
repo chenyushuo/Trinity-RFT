@@ -606,9 +606,9 @@ def run_serve(config: Config, stop_event=None) -> None:
 
 @parameterized_class(
     ("use_priority_queue", "strategy"),
-    [(False, "fsdp"), (True, "fsdp2"), (True, "megatron")],
+    [(True, "fsdp2"), (True, "megatron")],
 )
-class TestFullyAsyncMode(unittest.TestCase):
+class TestMultiExplorerFullyAsyncMode(unittest.TestCase):
     def setUp(self):
         if multiprocessing.get_start_method(allow_none=True) != "spawn":
             multiprocessing.set_start_method("spawn", force=True)
@@ -619,7 +619,8 @@ class TestFullyAsyncMode(unittest.TestCase):
         config.project = "unittest"
         config.name = f"fully_async_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         config.checkpoint_root_dir = get_checkpoint_path()
-        config.buffer.total_epochs = 1
+        # run multiple epochs to make sure the trainer can sync with explorer multiple times.
+        config.buffer.total_epochs = 4
         config.buffer.batch_size = 4
         config.cluster.gpu_per_node = 2
         config.cluster.node_num = 1
@@ -631,9 +632,10 @@ class TestFullyAsyncMode(unittest.TestCase):
         )
         config.buffer.trainer_input.experience_buffer.replay_buffer.enable = self.use_priority_queue
         config.synchronizer.sync_method = SyncMethod.CHECKPOINT
-        config.synchronizer.sync_style = SyncStyle.EXPLORER_DRIVEN
-        config.synchronizer.sync_interval = 8
+        config.synchronizer.sync_style = SyncStyle.FULLY_ASYNC
+        config.synchronizer.sync_interval = 2
         config.trainer.trainer_strategy = self.strategy
+        config.trainer.total_steps = 8
         config.monitor.monitor_type = "tensorboard"
         trainer_config = deepcopy(config)
         trainer_config.mode = "train"
@@ -711,12 +713,18 @@ class TestFullyAsyncMode(unittest.TestCase):
             os.path.join(explorer1_config.monitor.cache_dir, "tensorboard", "explorer1")
         )
         rollout_metrics = parser.metric_list("rollout")
-        self.assertEqual(parser.metric_max_step(rollout_metrics[0]), 4)
+        self.assertGreaterEqual(parser.metric_max_step(rollout_metrics[0]), 4)
+        # check the model version in the explorer is greater than 0
+        model_version = parser.metric_list("rollout/model_version")[0]
+        self.assertGreater(parser.metric_values(model_version)[-1], 0)
         parser = TensorBoardParser(
             os.path.join(explorer2_config.monitor.cache_dir, "tensorboard", "explorer2")
         )
         rollout_metrics = parser.metric_list("rollout")
-        self.assertEqual(parser.metric_max_step(rollout_metrics[0]), 4)
+        self.assertGreaterEqual(parser.metric_max_step(rollout_metrics[0]), 4)
+        # check the model version in the explorer is greater than 0
+        model_version = parser.metric_list("rollout/model_version")[0]
+        self.assertGreater(parser.metric_values(model_version)[-1], 0)
         # check the checkpoint
         explorer1_cache = StateManager(
             path=explorer1_config.checkpoint_job_dir,
@@ -725,7 +733,7 @@ class TestFullyAsyncMode(unittest.TestCase):
             config=explorer1_config,
         )
         cache = explorer1_cache.load_explorer()
-        self.assertEqual(cache["latest_iteration"], 4)
+        self.assertGreaterEqual(cache["latest_iteration"], 4)
         explorer2_cache = StateManager(
             path=explorer2_config.checkpoint_job_dir,
             trainer_name=None,
@@ -733,7 +741,7 @@ class TestFullyAsyncMode(unittest.TestCase):
             config=explorer2_config,
         )
         cache = explorer2_cache.load_explorer()
-        self.assertEqual(cache["latest_iteration"], 4)
+        self.assertGreaterEqual(cache["latest_iteration"], 4)
         trainer_cache = StateManager(
             path=trainer_config.checkpoint_job_dir,
             trainer_name=trainer_config.trainer.name,
@@ -1737,3 +1745,32 @@ class ColocateModeTest(RayUnittestBase):
         eval_metrics = parser.metric_list("eval")
         self.assertGreater(len(eval_metrics), 0)
         self.assertEqual(parser.metric_max_step(eval_metrics[0]), 2)
+
+
+class FullAsyncNCCLTest(BaseTrainerCase):
+    def test_trainer(self):
+        """Test full async with NCCL communication."""
+        self.config.cluster.node_num = 2
+        self.config.cluster.gpu_per_node = 2
+        self.config.algorithm.algorithm_type = "grpo"
+        self.config.algorithm.advantage_fn = "grpo"
+        self.config.algorithm.repeat_times = 4
+        self.config.buffer.batch_size = 4
+        self.config.buffer.explorer_input.taskset = get_unittest_dataset_config("gsm8k")
+        self.config.explorer.rollout_model.tensor_parallel_size = 2
+        self.config.explorer.rollout_model.engine_num = 1
+        self.config.synchronizer.sync_interval = 1
+        self.config.synchronizer.sync_method = SyncMethod.NCCL
+        self.config.synchronizer.sync_style = SyncStyle.FULLY_ASYNC
+        self.config.check_and_update()
+        both(self.config)
+        parser = TensorBoardParser(os.path.join(self.config.monitor.cache_dir, "tensorboard"))
+        rollout_metrics = parser.metric_list("rollout")
+        self.assertGreater(len(rollout_metrics), 0)
+        pipeline_metrics = parser.metric_list("experience_pipeline")
+        self.assertGreater(len(pipeline_metrics), 0)
+        self.assertEqual(parser.metric_max_step(rollout_metrics[0]), 8)
+        # check model version
+        model_versions = parser.metric_values("rollout/model_version")
+        self.assertEqual(model_versions[0], 0)
+        self.assertGreater(model_versions[-1], 0)

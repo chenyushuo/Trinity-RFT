@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,19 +19,46 @@ class _SyncViewerStorage:
 
     def __init__(self, config: StorageConfig) -> None:
         self._loop = asyncio.new_event_loop()
+        self._loop_ready = threading.Event()
+        self._closed = False
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        self._loop_ready.wait()
         self._async = SQLExperienceStorage(config)
-        self._loop.run_until_complete(self._async.prepare())
+        self._run(self._async.prepare())
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop_ready.set()
+        self._loop.run_forever()
+
+    def _submit(self, coro):
+        if self._closed:
+            raise RuntimeError("Viewer storage has been closed.")
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def _run(self, coro):
-        return self._loop.run_until_complete(coro)
+        return self._submit(coro).result()
 
     def close(self):
-        if self._loop and not self._loop.is_closed():
-            self._loop.run_until_complete(self._async.engine.dispose())
-            self._loop.close()
+        if self._closed:
+            return
+
+        try:
+            if hasattr(self, "_async") and hasattr(self._async, "engine"):
+                self._run(self._async.engine.dispose())
+        finally:
+            if self._loop and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                self._thread.join(timeout=5)
+                self._loop.close()
+            self._closed = True
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def query(self, offset: int = 0, limit: int = 10, filters=None) -> List[Experience]:
         return self._run(self._async.query(offset, limit, filters))
@@ -254,6 +282,13 @@ def main():  # noqa: [C901]
     if "page" not in st.session_state:
         st.session_state.page = 1
 
+    def _set_page(page: int) -> None:
+        st.session_state.page = page
+        st.session_state.page_input = page
+
+    def _sync_page_from_input() -> None:
+        st.session_state.page = st.session_state.page_input
+
     # === Sidebar: Filters ===
     st.sidebar.header("Filters")
 
@@ -314,7 +349,12 @@ def main():  # noqa: [C901]
 
     # Clamp current page
     if st.session_state.page > total_pages:
-        st.session_state.page = total_pages
+        _set_page(total_pages)
+
+    if "page_input" not in st.session_state:
+        st.session_state.page_input = st.session_state.page
+    elif st.session_state.page_input != st.session_state.page:
+        st.session_state.page_input = st.session_state.page
 
     # Calculate offset and fetch
     offset = (st.session_state.page - 1) * experiences_per_page
@@ -348,22 +388,22 @@ def main():  # noqa: [C901]
     # Row 1: Previous | [current_page] / total_pages | Next
     col_prev, col_page_input, col_slash, col_total, col_next = st.columns([1, 1, 0.3, 0.7, 1])
     with col_prev:
-        if st.button("Previous", disabled=(st.session_state.page <= 1)):
-            st.session_state.page -= 1
-            st.rerun()
+        st.button(
+            "Previous",
+            disabled=(st.session_state.page <= 1),
+            on_click=_set_page,
+            args=(st.session_state.page - 1,),
+        )
     with col_page_input:
-        new_page = st.number_input(
+        st.number_input(
             "page",
             min_value=1,
             max_value=total_pages,
-            value=st.session_state.page,
             step=1,
             label_visibility="collapsed",
             key="page_input",
+            on_change=_sync_page_from_input,
         )
-        if new_page != st.session_state.page:
-            st.session_state.page = new_page
-            st.rerun()
     with col_slash:
         st.markdown(
             "<div style='text-align:center;line-height:38px;'>/</div>",
@@ -375,9 +415,12 @@ def main():  # noqa: [C901]
             unsafe_allow_html=True,
         )
     with col_next:
-        if st.button("Next", disabled=(st.session_state.page >= total_pages)):
-            st.session_state.page += 1
-            st.rerun()
+        st.button(
+            "Next",
+            disabled=(st.session_state.page >= total_pages),
+            on_click=_set_page,
+            args=(st.session_state.page + 1,),
+        )
 
     # Row 2: total count
     st.caption(f"{total_seq_num} experiences in total")

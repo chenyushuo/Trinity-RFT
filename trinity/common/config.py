@@ -783,6 +783,9 @@ class ExplorerConfig:
     # report runner state every `runner_state_report_interval` seconds, 0 to disable
     runner_state_report_interval: int = 0
 
+    # Maximum number of train batches that RolloutCoordinator can hold simultaneously.
+    max_inflight_batches: int = 2
+
 
 @dataclass
 class MegatronParallelConfig:
@@ -803,7 +806,7 @@ class TrainerConfig:
     trainer_type: str = "verl"
     trainer_strategy: str = "fsdp2"  # "fsdp", "fsdp2" or "megatron"
     save_interval: int = 0
-    enable_preview: bool = True  # enable rollout preview in wandb
+    enable_preview: bool = False  # enable rollout preview in wandb
     enable_prefetch: bool = False  # whether to prefetch data for the next step during training
     total_steps: Optional[
         int

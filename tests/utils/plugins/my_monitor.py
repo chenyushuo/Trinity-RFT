@@ -17,9 +17,6 @@ class MyMonitor(Monitor):
         self.logger = SummaryWriter(self.tensorboard_dir)
         self.console_logger = get_logger(__name__)
 
-    def log_table(self, table_name: str, experiences_table, step: int):
-        pass
-
     def log(self, data: dict, step: int, commit: bool = False) -> None:
         """Log metrics."""
         for key in data:

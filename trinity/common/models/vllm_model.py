@@ -585,7 +585,7 @@ class vLLMRolloutModel(BaseInferenceModel):
         from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
 
         await self.async_llm.pause_generation(mode="keep", clear_cache=False)
-        await self.async_llm.reset_prefix_cache(reset_running_requests=False)
+        await self.async_llm.reset_prefix_cache(reset_running_requests=True)
 
         await self.async_llm.start_weight_update(is_checkpoint_format=True)
         update_info = {}

@@ -85,15 +85,34 @@ def setup_ray_cluster(namespace: str) -> str:
     else:
         if is_master:
             cmd = f"ray start --head --port={env_vars['MASTER_PORT']} --node-ip-address={env_vars['MASTER_ADDR']}"
+            ret = subprocess.run(cmd, shell=True, capture_output=True)
+            logger.info(f"Starting ray cluster: {cmd}")
+            if ret.returncode != 0:
+                logger.error(f"Failed to start ray cluster: {cmd}")
+                logger.error(f"ret.stdout: {ret.stdout!r}")
+                logger.error(f"ret.stderr: {ret.stderr!r}")
+                sys.exit(1)
         else:
             cmd = f"ray start --address={env_vars['MASTER_ADDR']}:{env_vars['MASTER_PORT']}"
-        ret = subprocess.run(cmd, shell=True, capture_output=True)
-        logger.info(f"Starting ray cluster: {cmd}")
-        if ret.returncode != 0:
-            logger.error(f"Failed to start ray cluster: {cmd}")
-            logger.error(f"ret.stdout: {ret.stdout!r}")
-            logger.error(f"ret.stderr: {ret.stderr!r}")
-            sys.exit(1)
+            logger.info(f"Starting ray worker: {cmd}")
+            retry_timeout = 600  # 10 minutes
+            retry_interval = 5
+            start_time = time.time()
+            while True:
+                ret = subprocess.run(cmd, shell=True, capture_output=True)
+                if ret.returncode == 0:
+                    break
+                elapsed = time.time() - start_time
+                if elapsed >= retry_timeout:
+                    logger.error(f"Failed to start ray worker after {retry_timeout}s: {cmd}")
+                    logger.error(f"ret.stdout: {ret.stdout!r}")
+                    logger.error(f"ret.stderr: {ret.stderr!r}")
+                    sys.exit(1)
+                logger.warning(
+                    f"Ray worker failed to connect to master (elapsed {elapsed:.0f}s), "
+                    f"retrying in {retry_interval}s..."
+                )
+                time.sleep(retry_interval)
 
         wait_for_ray_setup()
         time.sleep(5)

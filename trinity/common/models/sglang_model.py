@@ -139,7 +139,7 @@ class SGLangClient:
         state_dict_meta_list: List[Tuple[str, str, Tuple]],
         group_name: str,
         flush_cache: bool = True,
-        abort_all_requests: bool = True,
+        abort_all_requests: bool = False,
         weight_version: Optional[str] = None,
         timeout: float = 300,
     ) -> bool:

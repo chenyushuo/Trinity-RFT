@@ -227,6 +227,8 @@ def prepare_configs(args, rank, current_time):
             config["synchronizer"]["sync_style"] = args.sync_style
         if args.trainer_strategy:
             config["trainer"]["trainer_strategy"] = args.trainer_strategy
+        if args.monitor:
+            config["monitor"]["monitor_type"] = args.monitor
 
         with open(config_path, "w") as f:
             yaml.dump(config, f, allow_unicode=True, sort_keys=False)
@@ -360,6 +362,13 @@ if __name__ == "__main__":
         default=None,
         choices=["fsdp", "fsdp2", "megatron"],
         help="Specify the trainer strategy.",
+    )
+    parser.add_argument(
+        "--monitor",
+        type=str,
+        default=None,
+        choices=["wandb", "tensorboard"],
+        help="Specify the monitor type.",
     )
     args = parser.parse_args()
     main(args)

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import traceback
 from typing import Dict, Optional
@@ -31,6 +32,23 @@ def get_input_buffers(pipeline_config: ExperiencePipelineConfig) -> Dict:
     return input_buffers
 
 
+def default_input_save_path(config: Config) -> str:
+    """Compute the default ``input_save_path`` for the experience pipeline.
+
+    This is the single source of truth for where the pipeline writes its input
+    database when ``save_input`` is enabled but no path is provided: a SQLite
+    database at ``<checkpoint_job_dir>/buffer/explorer_output.db``.
+
+    It is derived purely from the config components (no Ray/GPU side effects), so
+    callers that load a config without a full validation pass — e.g. ``trinity view``
+    — resolve the exact same path the pipeline writes to at run time. The
+    ``abspath`` mirrors ``GlobalConfigValidator`` making a relative
+    ``checkpoint_root_dir`` absolute, keeping the two contexts consistent.
+    """
+    cache_dir = os.path.abspath(os.path.join(config.get_checkpoint_job_dir(), "buffer"))
+    return "sqlite:///" + os.path.join(cache_dir, "explorer_output.db")
+
+
 class ExperiencePipeline:
     """
     A class to process experiences.
@@ -54,8 +72,15 @@ class ExperiencePipeline:
         """Initialize the input storage if it is not already set."""
         if pipeline_config.save_input:
             if pipeline_config.input_save_path is None:
-                raise ValueError("input_save_path must be set when save_input is True.")
-            elif is_json_file(pipeline_config.input_save_path):
+                # The pipeline owns this default — it is the component that actually
+                # creates the database. Resolved here (rather than in a config
+                # validator) so it works regardless of whether full validation runs.
+                pipeline_config.input_save_path = default_input_save_path(self.config)
+                self.logger.info(
+                    "Auto set `data_processor.experience_pipeline.input_save_path` "
+                    f"to {pipeline_config.input_save_path}"
+                )
+            if is_json_file(pipeline_config.input_save_path):
                 return get_buffer_writer(
                     StorageConfig(
                         storage_type=StorageType.FILE.value,
