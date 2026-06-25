@@ -298,16 +298,6 @@ class RayClusterConfigValidator(ConfigValidator):
                 cluster.trainer_node_num = cluster.trainer_gpu_num // cluster.gpu_per_node
                 cluster.trainer_gpu_num_per_node = cluster.gpu_per_node
 
-    @staticmethod
-    def _get_model_gpu_num(model_config) -> int:
-        if model_config.gpu_num is not None:
-            return model_config.gpu_num
-        return (
-            model_config.tensor_parallel_size
-            * model_config.data_parallel_size
-            * model_config.pipeline_parallel_size
-        )
-
     def _validate_multinode_inference_models(self, config: Config) -> None:
         """Validate per-engine multi-node inference settings.
 
