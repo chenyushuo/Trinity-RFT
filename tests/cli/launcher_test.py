@@ -426,3 +426,89 @@ class TestLauncherMain(unittest.IsolatedAsyncioTestCase):
             print("result.exc_info:", result.exc_info)
             self.assertNotEqual(result.exit_code, 0)
             self.assertEqual(result.exc_info[0], FileNotFoundError)
+
+    @mock.patch("trinity.manager.checkpoint_converter.Converter")
+    def test_convert_basic_and_single_step(self, mock_converter_cls):
+        """Test convert without --step (original behavior) and with a single --step."""
+        mock_converter = mock_converter_cls.return_value
+
+        # Case 1: No --step, pointing at a global_step dir (walks up to it)
+        result = runner.invoke(
+            launcher.app,
+            ["convert", "-c", "/tmp/ckpt/global_step_100/actor"],
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_converter_cls.assert_called_with(None)
+        mock_converter.convert.assert_called_with("/tmp/ckpt/global_step_100")
+        mock_converter.reset_mock()
+        mock_converter_cls.reset_mock()
+
+        # Case 2: No --step, pointing at a root dir (passes through as-is)
+        result = runner.invoke(
+            launcher.app,
+            ["convert", "-c", "/tmp/ckpt"],
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_converter.convert.assert_called_with("/tmp/ckpt")
+        mock_converter.reset_mock()
+        mock_converter_cls.reset_mock()
+
+        # Case 3: Single --step with base-model-dir
+        with mock.patch("os.path.isdir", return_value=True):
+            result = runner.invoke(
+                launcher.app,
+                ["convert", "-c", "/tmp/ckpt", "-b", "/tmp/base", "-s", "100"],
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            mock_converter_cls.assert_called_with("/tmp/base")
+            mock_converter.convert.assert_called_once_with("/tmp/ckpt/global_step_100")
+            self.assertIn("Succeeded:       1", result.output)
+
+    @mock.patch("trinity.manager.checkpoint_converter.Converter")
+    def test_convert_multi_step(self, mock_converter_cls):
+        """Test multi-step conversion: comma-separated, mixed success/failure, and path resolution."""
+        mock_converter = mock_converter_cls.return_value
+
+        # Simulate: step 100 exists, step 200 missing, step 300 exists but raises
+        def fake_isdir(path):
+            basename = os.path.basename(path)
+            return basename in ("global_step_100", "global_step_300")
+
+        def fake_convert(step_dir):
+            if step_dir.endswith("global_step_300"):
+                raise RuntimeError("conversion failed")
+
+        mock_converter.convert.side_effect = fake_convert
+
+        # Case 1: comma-separated steps, checkpoint-dir points inside a global_step dir
+        with mock.patch("os.path.isdir", side_effect=fake_isdir):
+            result = runner.invoke(
+                launcher.app,
+                ["convert", "-c", "/tmp/ckpt/global_step_100/actor", "-s", "100,200,300"],
+            )
+            # Should exit with code 1 because there are failures
+            self.assertEqual(result.exit_code, 1, msg=result.output)
+            # Root dir should be resolved to /tmp/ckpt (parent of global_step_*)
+            mock_converter.convert.assert_any_call("/tmp/ckpt/global_step_100")
+            mock_converter.convert.assert_any_call("/tmp/ckpt/global_step_300")
+            self.assertEqual(mock_converter.convert.call_count, 2)  # step 200 skipped (not isdir)
+            # Report checks
+            self.assertIn("Total requested: 3", result.output)
+            self.assertIn("Succeeded:       1", result.output)
+            self.assertIn("Failed:          2", result.output)
+            self.assertIn("Step 200", result.output)
+            self.assertIn("Step 300", result.output)
+            mock_converter.reset_mock()
+
+        # Case 2: all steps succeed
+        with mock.patch("os.path.isdir", return_value=True):
+            mock_converter.convert.side_effect = None
+            mock_converter.convert.return_value = None
+            result = runner.invoke(
+                launcher.app,
+                ["convert", "-c", "/tmp/ckpt", "-s", "50,100"],
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(mock_converter.convert.call_count, 2)
+            self.assertIn("Succeeded:       2", result.output)
+            self.assertIn("Failed:          0", result.output)
