@@ -1298,9 +1298,12 @@ class TrainerConfigValidator(ConfigValidator):
                 else:
                     from trinity.trainer.verl_legacy.verl_config import veRLConfig
 
-                    self.logger.info("`trainer_config` is not provided, using default trainer config.")
+                    self.logger.info(
+                        "`trainer_config` is not provided, using default trainer config."
+                    )
                     config.trainer.trainer_config = veRLConfig()
                 config.trainer.trainer_config.synchronize_config(config)
+
             if config.trainer.save_hf_checkpoint not in {"last", "always", "never"}:
                 raise ValueError(
                     f"Invalid trainer.save_hf_checkpoint: {config.trainer.save_hf_checkpoint}, "
