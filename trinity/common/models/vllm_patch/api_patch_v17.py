@@ -17,7 +17,6 @@ from vllm.entrypoints.openai.api_server import (
     validate_api_server_args,
 )
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.utils import log_non_default_args
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -33,7 +32,14 @@ def setup_server_in_ray(args, logger):
     ready to serve."""
 
     logger.info("vLLM API server version %s", VLLM_VERSION)
-    log_non_default_args(args)
+    if get_vllm_version() < parse_version("0.23.0"):
+        from vllm.entrypoints.utils import log_non_default_args
+
+        log_non_default_args(args)
+    else:
+        from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
+
+        log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)

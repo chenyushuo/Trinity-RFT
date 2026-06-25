@@ -151,7 +151,7 @@ class Learn2AskWorkflow(SimpleWorkflow):
                     content = ""
                     for chunk in completion:
                         if chunk.choices:
-                            content += chunk.choices[0].delta.content
+                            content += chunk.choices[0].delta.content or ""
                 score_dict = self.parse_tag_string(content)
                 return score_dict
             except Exception as e:

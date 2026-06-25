@@ -10,7 +10,6 @@ from trinity.common.config import InferenceModelConfig
 
 VLLM_VERSION_0120 = parse_version("0.12.0")
 VLLM_VERSION_0170 = parse_version("0.17.0")
-VLLM_VERSION_0220 = parse_version("0.22.0")
 
 
 def vllm_patch():
@@ -122,7 +121,7 @@ def _get_api_server_runner(vllm_version):
 
         return run_api_server_in_ray_actor_v13
 
-    if VLLM_VERSION_0170 <= vllm_version <= VLLM_VERSION_0220:
+    if VLLM_VERSION_0170 <= vllm_version:
         from trinity.common.models.vllm_patch.api_patch_v17 import (
             run_api_server_in_ray_actor_v17,
         )
@@ -131,7 +130,7 @@ def _get_api_server_runner(vllm_version):
 
     raise ValueError(
         f"Unsupported vLLM version: {vllm.__version__}. "
-        "This patch supports vLLM versions 0.12.0, (0.12.0, 0.17.0), and [0.17.0, 0.22.0]."
+        "This patch supports vLLM 0.12.0 and above. Please upgrade vLLM to use the API server."
     )
 
 

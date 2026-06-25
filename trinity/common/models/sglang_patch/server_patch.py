@@ -77,8 +77,14 @@ def _apply_openai_api_monkey_patch() -> None:
     serving_chat_module.ChatCompletionRequest = PatchedChatCompletionRequest
     serving_chat_module.ChatCompletionResponse = PatchedChatCompletionResponse
     serving_chat_module.ChatCompletionResponseChoice = PatchedChatCompletionResponseChoice
+    # `OpenAIServingChat` must be patched on the `serving_chat` module itself:
+    # since sglang >= 0.5.13 the chat-completion serving instance is created via
+    # `tokenizer_manager.serving_chat_class`, which imports `OpenAIServingChat`
+    # fresh from this module. Patching only `http_server_module.OpenAIServingChat`
+    # (as done for older versions) left the live instance on the original class,
+    # so `prompt_token_ids`/`token_ids` were never returned.
+    serving_chat_module.OpenAIServingChat = PatchedOpenAIServingChat
     http_server_module.ChatCompletionRequest = PatchedChatCompletionRequest
-    http_server_module.OpenAIServingChat = PatchedOpenAIServingChat
 
     _refresh_chat_completion_routes()
 

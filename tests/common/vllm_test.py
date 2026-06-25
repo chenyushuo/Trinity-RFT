@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import shutil
 import unittest
 from copy import deepcopy
 from typing import cast
@@ -14,11 +16,13 @@ from tests.tools import (
     CHAT_TEMPLATE,
     RayUnittestBaseAsync,
     get_api_model_path,
+    get_checkpoint_path,
     get_model_path,
     get_moe_model_path,
     get_template_config,
 )
 from trinity.common.config import Config
+from trinity.common.constants import ROLLOUT_WEIGHT_SYNC_GROUP_NAME, SyncMethod
 from trinity.common.models.allocator import Allocator
 from trinity.common.models.model import ModelWrapper
 from trinity.manager.synchronizer import Synchronizer
@@ -76,6 +80,19 @@ def _assert_routed_experts_shape(test_case, exp, expected_layers: int, expected_
         tuple(routed_experts.shape),
         (len(exp.tokens) - 1, expected_layers, expected_topk),
     )
+
+
+def _load_gsm8k_questions() -> list[str]:
+    """Load the diverse math questions from the GSM8K training set."""
+    path = os.path.join(os.path.dirname(__file__), "..", "template", "data", "gsm8k", "train.jsonl")
+    questions: list[str] = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            questions.append(json.loads(line)["question"])
+    return questions
 
 
 class VLLMTestBase(RayUnittestBaseAsync):
@@ -607,7 +624,7 @@ class TestMessageProcess(VLLMTestBase):
         self.assertLessEqual(model_len, self.config.model.max_model_len)
 
 
-class TestAPIServer(VLLMTestBase):
+class TestAPIServerCommon(VLLMTestBase):
     async def asyncSetUp(self):
         self.config = get_template_config()
         self.config.mode = "explore"
@@ -638,7 +655,7 @@ class TestAPIServer(VLLMTestBase):
         )
         content = ""
         for chunk in response:
-            content += chunk.choices[0].delta.content
+            content += chunk.choices[0].delta.content or ""
             self.assertTrue(len(chunk.choices) == 1)
         self.assertTrue(len(content) > 0)
         response = openai_client.chat.completions.create(
@@ -1133,7 +1150,7 @@ class TestAsyncAPIServer(VLLMTestBase):
         contents = ["", "", "", ""]
         async for chunk in response:
             for choice in chunk.choices:
-                contents[choice.index] += choice.delta.content
+                contents[choice.index] += choice.delta.content or ""
         exps = self.model_wrapper.extract_experience_from_history()
         self.assertEqual(len(exps), 4)
         for exp in exps:
@@ -1199,6 +1216,310 @@ class TestTinkerAsyncAPIServer(TestAsyncAPIServer):
 
     async def test_api_async(self):
         await super().test_api_async()
+
+
+class TestConcurrentSyncWeights(VLLMTestBase):
+    """The vLLM engine must keep serving OpenAI chat completions while a weight
+    sync is in progress.
+
+    When ``sync_model_weights`` is invoked it pauses generation, swaps weights and
+    resumes. Requests that were already submitted must not be dropped or crash —
+    after the sync finishes they should still produce normal content, and the
+    engine should keep accepting new requests.
+    """
+
+    async def asyncSetUp(self):
+        self.config = get_template_config()
+        self.config.mode = "explore"
+        self.config.model.model_path = get_model_path()
+        self.config.explorer.rollout_model.engine_type = "vllm"
+        self.config.explorer.rollout_model.engine_num = 1
+        self.config.explorer.rollout_model.tensor_parallel_size = 4
+        self.config.explorer.rollout_model.chat_template = CHAT_TEMPLATE
+        self.config.explorer.rollout_model.enable_openai_api = True
+        self.config.explorer.rollout_model.enable_history = True
+        # Use the checkpoint-based weight sync. The checkpoint holds the *same*
+        # weights as the running model, so the swap is a semantic no-op and the
+        # test isolates the concurrency behavior rather than the weight values.
+        self.config.explorer.rollout_model.sync_method = SyncMethod.CHECKPOINT
+        self.config.explorer.rollout_model.extra_engine_args = {
+            "attention_backend": "FLASHINFER",
+        }
+        # A throwaway checkpoint root for this test run.
+        self.config.checkpoint_root_dir = get_checkpoint_path()
+        self.config.check_and_update()
+
+        self.engines, self.auxiliary_engines = await create_test_models(self.config)
+        self.model_wrapper = self.engines[0]
+        self.openai_client = self.model_wrapper.get_openai_async_client()
+        self.model_id = self.openai_client.model_path
+        master_addr, master_port = await self.model_wrapper.get_available_address_async()
+        # Stand up the weight-transfer process group for the single inference rank
+        # (this mirrors the single-engine deployment path in Explorer).
+        await self.model_wrapper.init_process_group(
+            master_address=master_addr,
+            master_port=master_port,
+            rank_offset=0,
+            world_size=4,
+            group_name=ROLLOUT_WEIGHT_SYNC_GROUP_NAME,
+        )
+
+        # Materialise an identical checkpoint at the path the engine expects:
+        #   <checkpoint_job_dir>/global_step_<version>/actor/huggingface/
+        self._target_version = 1
+        huggingface_dir = os.path.join(
+            self.config.get_checkpoint_job_dir(),
+            f"global_step_{self._target_version}",
+            "actor",
+            "huggingface",
+        )
+        os.makedirs(huggingface_dir, exist_ok=True)
+        for entry in os.listdir(self.config.model.model_path):
+            link = os.path.join(huggingface_dir, entry)
+            if not os.path.exists(link):
+                os.symlink(os.path.join(self.config.model.model_path, entry), link)
+
+    async def asyncTearDown(self):
+        try:
+            await self.model_wrapper.teardown_process_group()
+        except Exception:
+            pass
+        await super().asyncTearDown()
+        checkpoint_path = get_checkpoint_path()
+        shutil.rmtree(os.path.join(checkpoint_path, "unittest"), ignore_errors=True)
+
+    async def test_chat_during_weight_sync(self):  # noqa: C901
+        # Use the diverse GSM8K math questions as prompts so each request hits
+        # different content rather than repeating one fixed prompt.
+        questions = _load_gsm8k_questions()
+        self.assertGreater(len(questions), 0)
+
+        # CHECKPOINT sync reloads the full model, so it is slow. To faithfully
+        # exercise the concurrency invariant we keep a pool of chat completions
+        # in flight for the *entire* sync window — topping up as requests finish
+        # until `sync_model_weights` returns.
+        concurrency = 4
+        temperature = 1.0
+        contents: list[str] = []
+        interrupted_contents: list[dict] = []  # responses that spanned the weight sync boundary
+        errors: list[BaseException] = []
+        sync_done = asyncio.Event()
+        submit_idx = {"i": 0}
+
+        def next_messages() -> list[dict]:
+            question = questions[submit_idx["i"] % len(questions)]
+            submit_idx["i"] += 1
+            return [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant. Solve the problem step by step.",
+                },
+                {"role": "user", "content": question},
+            ]
+
+        async def one_request() -> dict:
+            messages = next_messages()
+            version_before = await self.model_wrapper.model_version_async
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_id,
+                messages=messages,
+                n=1,
+                temperature=temperature,
+                max_tokens=2048,
+            )
+            version_after = await self.model_wrapper.model_version_async
+            content = response.choices[0].message.content
+            return {
+                "content": content,
+                "question": messages[-1]["content"],
+                "version_before": version_before,
+                "version_after": version_after,
+                "interrupted": version_before != version_after,
+            }
+
+        async def submitter():
+            in_flight: set[asyncio.Task] = set()
+            while True:
+                # Keep the pool full while the sync is still running.
+                while len(in_flight) < concurrency and not sync_done.is_set():
+                    in_flight.add(asyncio.create_task(one_request()))
+                if not in_flight:
+                    break  # sync finished and nothing left to drain
+                done, in_flight = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        result = task.result()
+                        contents.append(result["content"])
+                        if result["interrupted"]:
+                            interrupted_contents.append(result)
+                    except BaseException as exc:  # noqa: BLE001
+                        errors.append(exc)
+
+        submitter_task = asyncio.create_task(submitter())
+
+        # Let a couple of requests actually start before triggering the sync.
+        await asyncio.sleep(10)
+        # Trigger the (slow) weight sync while chat requests keep flowing.
+        await self.model_wrapper.sync_model_weights(self._target_version, SyncMethod.CHECKPOINT)
+        sync_done.set()
+
+        await submitter_task
+
+        # Extract all experiences from history to match with interrupted requests
+        all_experiences = self.model_wrapper.extract_experience_from_history()
+
+        # Print interrupted responses that spanned the weight sync boundary
+        if interrupted_contents:
+            print(
+                f"\n{'=' * 60}\n"
+                f" {len(interrupted_contents)} request(s) interrupted by weight sync "
+                f"(model_version changed during generation)\n"
+                f"{'=' * 60}"
+            )
+
+            # Match interrupted requests with their experiences and verify logprobs consistency
+            for idx, item in enumerate(interrupted_contents):
+                print(
+                    f"\n--- Interrupted Request {idx + 1} ---\n"
+                    f"  model_version: {item['version_before']} -> {item['version_after']}\n"
+                    f"  Question: {item['question'][:120]}...\n"
+                    f"  Response: {item['content']}\n"
+                )
+
+                # Find matching experience by comparing response text
+                matching_exp = None
+                for exp in all_experiences:
+                    if exp.response_text == item["content"]:
+                        matching_exp = exp
+                        break
+
+                if matching_exp:
+                    print("  Original Experience Data:")
+                    print(f"    - logprobs_shape: {matching_exp.logprobs.shape}")
+                    print(f"    - prompt_length: {matching_exp.prompt_length}")
+                    print(f"    - total_tokens: {len(matching_exp.tokens)}")
+
+                    # Recompute logprobs on the original tokens (prompt + response) using
+                    # the post-sync model. This verifies that the weight sync did not
+                    # corrupt the model: the same token sequence should yield nearly
+                    # identical logprobs before and after the sync.
+                    print("  Recomputing logprobs on original tokens after weight sync...")
+                    recomputed_logprobs = self.model_wrapper.logprobs(
+                        matching_exp.tokens.tolist(), temperature=temperature
+                    )
+                    # logprobs() returns shape (num_tokens - 1,), where logprobs[i] is
+                    # the log-probability of token[i+1] given token[:i+1].
+                    # The experience stores only the response portion, i.e. from index
+                    # (prompt_length - 1) onwards.
+                    original_response_logprobs = matching_exp.logprobs
+                    recomputed_response_logprobs = recomputed_logprobs[
+                        matching_exp.prompt_length - 1 :
+                    ]
+
+                    print("  Logprobs Comparison:")
+
+                    self.assertEqual(
+                        original_response_logprobs.shape,
+                        recomputed_response_logprobs.shape,
+                        "logprobs shape mismatch between original and recomputed",
+                    )
+
+                    # Use torch.allclose with tolerances similar to test_logprobs_api
+                    logprobs_similar = torch.allclose(
+                        original_response_logprobs,
+                        recomputed_response_logprobs,
+                        rtol=0.4,
+                        atol=1e-2,
+                    )
+                    print(f"    - logprobs_similar (rtol=0.4, atol=1e-2): {logprobs_similar}")
+
+                    if logprobs_similar:
+                        print("    ✓ Logprobs are consistent after weight sync")
+                    else:
+                        print("    ✗ Logprobs differ after weight sync")
+                        abs_diff = torch.abs(
+                            original_response_logprobs - recomputed_response_logprobs
+                        )
+                        mean_diff = torch.mean(abs_diff).item()
+                        max_diff = torch.max(abs_diff).item()
+                        print(f"    - mean_abs_diff: {mean_diff:.6f}")
+                        print(f"    - max_abs_diff: {max_diff:.6f}")
+
+                        # Find positions where the difference exceeds tolerance
+                        # torch.allclose uses: |a - b| <= atol + rtol * |b|
+                        tolerance = 1e-2 + 0.4 * torch.abs(recomputed_response_logprobs)
+                        mismatch_mask = abs_diff > tolerance
+                        mismatch_indices = torch.where(mismatch_mask)[0]
+
+                        print(
+                            f"    - num_mismatched_positions: {len(mismatch_indices)} / {len(original_response_logprobs)}"
+                        )
+
+                        if len(mismatch_indices) > 0:
+                            # Load tokenizer to decode mismatched tokens
+                            _tokenizer = AutoTokenizer.from_pretrained(self.config.model.model_path)
+                            # response tokens start at prompt_length in matching_exp.tokens
+                            response_tokens = matching_exp.tokens[matching_exp.prompt_length :]
+
+                            print("    - Top 5 largest mismatches:")
+                            # Get top 5 largest differences
+                            top_k = min(5, len(mismatch_indices))
+                            top_diffs, top_indices = torch.topk(abs_diff[mismatch_mask], top_k)
+
+                            for i, (diff_val, idx) in enumerate(
+                                zip(top_diffs, mismatch_indices[top_indices])
+                            ):
+                                orig_val = original_response_logprobs[idx].item()
+                                recomp_val = recomputed_response_logprobs[idx].item()
+                                tol_val = tolerance[idx].item()
+                                # logprobs[i] is the log-prob of token[i+1],
+                                # so the mismatched token is response_tokens[idx]
+                                token_id = response_tokens[idx].item()
+                                token_text = _tokenizer.decode([token_id])
+                                # ANSI red: \033[91m ... \033[0m
+                                red_token = f"\033[91m{repr(token_text)}\033[0m"
+                                print(
+                                    f"      [{i + 1}] position={idx.item()}, "
+                                    f"token={red_token} (id={token_id}): "
+                                    f"original={orig_val:.6f}, recomputed={recomp_val:.6f}, "
+                                    f"diff={diff_val.item():.6f}, tolerance={tol_val:.6f}"
+                                )
+
+                            # Print the full response text with mismatched tokens highlighted in red
+                            print("    - Response text with mismatched tokens highlighted in red:")
+                            highlighted_parts = []
+                            mismatch_set = set(mismatch_indices.tolist())
+                            for pos in range(len(response_tokens)):
+                                token_text = _tokenizer.decode([response_tokens[pos].item()])
+                                if pos in mismatch_set:
+                                    highlighted_parts.append(f"\033[91m{token_text}\033[0m")
+                                else:
+                                    highlighted_parts.append(token_text)
+                            print(f"      {''.join(highlighted_parts)}")
+
+                    self.assertTrue(
+                        logprobs_similar,
+                        f"Logprobs for interrupted request {idx + 1} are not consistent "
+                        f"after weight sync (mean_diff={mean_diff:.6f}, max_diff={max_diff:.6f}, "
+                        f"num_mismatched={len(mismatch_indices) if not logprobs_similar else 0})"
+                        if not logprobs_similar
+                        else "",
+                    )
+                else:
+                    print("  [WARNING] No matching experience found in history")
+
+            print(f"{'=' * 60}\n")
+        else:
+            print(
+                "\n[INFO] No requests were interrupted by weight sync "
+                "(model_version did not change during any generation)."
+            )
+
+        self.assertEqual(errors, [], f"some chat requests failed: {errors!r}")
+        self.assertGreater(len(contents), 0)
+        for content in contents:
+            self.assertIsNotNone(content)
+            self.assertGreater(len(content), 0)
 
 
 @parameterized_class(
