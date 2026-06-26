@@ -73,6 +73,8 @@ class TrinityActorRolloutRefWorker(ActorRolloutRefWorker):
         """
         from trinity.trainer.verl.monkey_patch import patch_verl_engine
 
+        patch_verl_engine()
+
         # Patch veRL engine for LoRA + FSDP2 dtype alignment.
         # veRL's _build_lora_module does not align trainable param dtypes
         # to the FSDP2 mixed-precision param_dtype, causing a gradient dtype
@@ -87,12 +89,6 @@ class TrinityActorRolloutRefWorker(ActorRolloutRefWorker):
         self.role = self.role.replace("_rollout", "")
         super().init_model()
         self.role = original_role
-
-        # Apply Trinity-specific patches on top of what veRL already did
-        if self.actor is not None and hasattr(self.actor, "engine"):
-            patch_verl_engine(self.actor.engine)
-        if self.ref is not None and hasattr(self.ref, "engine"):
-            patch_verl_engine(self.ref.engine)
 
         self._cache_state_dict_meta()
 
@@ -493,4 +489,4 @@ class TrinityCriticWorker(TrainingWorker):
         super().__init__(config)
         from trinity.trainer.verl.monkey_patch import patch_verl_engine
 
-        patch_verl_engine(self.engine)
+        patch_verl_engine()

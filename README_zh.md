@@ -41,6 +41,7 @@ Trinity-RFT 面向不同背景和目标的用户提供相应功能：
 
 ## 🚀 新闻
 
+* [2026-06] [[发布说明]](https://github.com/agentscope-ai/Trinity-RFT/releases/tag/v0.6.0) Trinity-RFT v0.6.0 发布：支持 SGLang，优化全异步参数同步以及调度策略以减少空泡，优化 MoE 模型训练稳定性，升级到 verl 0.8.0。
 * [2026-06] 🎉 两篇论文被 ICML 2026 接收：[Learn-to-Ask](https://github.com/agentscope-ai/Trinity-RFT/tree/main/examples/learn_to_ask) 和 [LLM-RL 熵动力学](https://github.com/agentscope-ai/Trinity-RFT/tree/main/examples/entropy)。
 * [2026-04] [[发布说明]](https://github.com/agentscope-ai/Trinity-RFT/releases/tag/v0.5.2) Trinity-RFT v0.5.2 发布：支持 Qwen3.5 系列，修复 Bug 并进行多项优化。
 * [2026-03] 🤖 Trinity-RFT 助力 CoPaw-Flash 训练，打造更懂本地化场景的智能体小模型。欢迎到 [CoPaw](https://github.com/agentscope-ai/CoPaw) 试用 CoPaw-Flash，模型下载请见 [ModelScope](https://www.modelscope.cn/organization/AgentScope) 和 [HuggingFace](https://huggingface.co/agentscope-ai)（[新闻](https://mp.weixin.qq.com/s/-BXNU_PMi6QJuwSB5BqTbQ)）。

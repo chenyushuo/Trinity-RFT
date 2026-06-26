@@ -1,5 +1,4 @@
 import warnings
-from types import MethodType
 from typing import Optional
 
 import torch
@@ -548,14 +547,10 @@ def prepare_model_inputs(self, micro_batch: TensorDict):
     return model_inputs, output_args
 
 
-def patch_verl_engine(engine):
-    if engine is None:
+def patch_verl_engine():
+    if getattr(FSDPEngine, "_patched", False):
         return
-    if isinstance(engine, FSDPEngine) and not getattr(engine, "_patched", False):
-        engine._build_module = MethodType(_build_module, engine)
-        engine.save_checkpoint = MethodType(save_checkpoint, engine)
-        # Patch prepare_model_inputs to inject seq_idx/cu_seqlens for
-        # packed-sequence models (e.g. Qwen3.5 GateDeltaNet).
-        if isinstance(engine, FSDPEngineWithLMHead):
-            engine.prepare_model_inputs = MethodType(prepare_model_inputs, engine)
-        setattr(engine, "_patched", True)
+    FSDPEngine._build_module = _build_module
+    FSDPEngine.save_checkpoint = save_checkpoint
+    FSDPEngineWithLMHead.prepare_model_inputs = prepare_model_inputs
+    setattr(FSDPEngine, "_patched", True)

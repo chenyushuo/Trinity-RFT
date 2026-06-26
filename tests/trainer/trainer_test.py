@@ -246,12 +246,12 @@ class TestStepAheadAsyncRL(BaseTrainerCase):
 
 
 @parameterized_class(
-    ("strategy", "offloading", "engine_type", "entropy_loss_fn"),
+    ("strategy", "offloading", "engine_type", "entropy_loss_fn", "sp_size"),
     [
-        ("megatron", False, "vllm", "none"),
-        ("fsdp2", False, "vllm", "none"),
-        ("megatron", True, "sglang", "default"),
-        ("fsdp2", True, "sglang", "default"),
+        ("megatron", False, "vllm", "none", 1),
+        ("fsdp2", False, "vllm", "none", 1),
+        ("megatron", True, "sglang", "default", 1),
+        ("fsdp2", True, "sglang", "default", 2),
     ],
 )
 class TestTrainerGSM8K(BaseTrainerCase):
@@ -278,6 +278,7 @@ class TestTrainerGSM8K(BaseTrainerCase):
         self.config.buffer.total_epochs = 1
         self.config.buffer.explorer_input.taskset = get_unittest_dataset_config("gsm8k")
         self.config.trainer.trainer_strategy = self.strategy
+        self.config.trainer.ulysses_sequence_parallel_size = self.sp_size
         if self.strategy == "megatron":
             self.config.trainer.megatron.tensor_model_parallel_size = 2
         self.config.trainer.max_checkpoints_to_keep = 2

@@ -40,7 +40,7 @@ RUN pip install uv && uv venv /opt/venv --python=python3.12
 
 # Install  Trinity-RFT
 RUN . /opt/venv/bin/activate && \
-    uv pip install -e .[mm,dev,tinker,data,agent] && \
+    uv pip install -e .[mm,dev,tinker,agent] && \
     uv pip install vllm==0.23.0
 
 # Install flash attention
@@ -72,8 +72,11 @@ RUN . /opt/venv/bin/activate && MAX_JOBS=${BUILD_JOBS} \
     git+https://github.com/NVIDIA/apex.git
 
 # Install SGLang
-RUN . /opt/venv/bin/activate && uv pip install sglang==0.5.13 --prerelease=allow && \
-    uv pip install transformers==5.12.1
+RUN . /opt/venv/bin/activate && uv pip install sglang==0.5.13 --prerelease=allow
+
+# Install some other dependencies
+RUN . /opt/venv/bin/activate && uv pip install py-data-juicer==1.5.2 && \
+    uv pip install transformers==5.12.1 fsspec==2026.4.0 numpy==2.4.6
 
 # Set Env variables
 # ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64
