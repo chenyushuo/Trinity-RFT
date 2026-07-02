@@ -15,6 +15,9 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Unpack,
     can_return_tuple,
 )
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeModelOutputWithPast,
+)
 from verl.utils.ulysses import all_gather_tensor, slice_input_tensor
 
 
@@ -206,7 +209,7 @@ def qwen35_model_forward(
     video_grid_thw: torch.LongTensor | None = None,
     mm_token_type_ids: torch.IntTensor | None = None,
     **kwargs: Unpack[TransformersKwargs],
-) -> tuple | Qwen3_5ModelOutputWithPast:
+) -> tuple | Qwen3_5ModelOutputWithPast | Qwen3_5MoeModelOutputWithPast:
     """Qwen3.5 model forward pass with multimodal support and gradient synchronization across ranks.
 
     This forward function handles multimodal training (images and/or videos) across multiple GPU ranks
@@ -329,7 +332,13 @@ def qwen35_model_forward(
         **kwargs,
     )
 
-    return Qwen3_5ModelOutputWithPast(
+    ret_cls = (
+        Qwen3_5ModelOutputWithPast
+        if "Moe" not in self.__class__.__name__
+        else Qwen3_5MoeModelOutputWithPast
+    )
+
+    return ret_cls(
         **outputs,
         rope_deltas=self.rope_deltas,
     )
