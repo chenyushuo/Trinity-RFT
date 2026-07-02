@@ -65,6 +65,8 @@ def load_reward_policy() -> RewardPolicy:
         baseline_subtract=_env_float("JUDGE_REWARD_BASELINE_SUBTRACT", 0.0),
         step_soft_limit=int(_env_float("JUDGE_STEP_SOFT_LIMIT", 50)),
         step_hard_limit=int(_env_float("JUDGE_STEP_HARD_LIMIT", 100)),
+        high_variance_multiplier=_env_float("JUDGE_HIGH_VARIANCE_MULTIPLIER", 0.85),
+        outcome_disagreement_multiplier=_env_float("JUDGE_OUTCOME_DISAGREEMENT_MULTIPLIER", 0.80),
     )
 
 
